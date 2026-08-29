@@ -21,11 +21,11 @@ These are implementation choices, not permanent product contracts:
 
 | Area | Choice | Reason |
 |---|---|---|
-| Host daemon | Go, one binary | Good OS/process/network support and simple deployment |
-| HTTP API | `net/http` | Standard library is enough initially |
+| Host daemon and guest harness | Rust, one toolchain | Static Linux binaries and memory-safe low-level runtime code |
+| HTTP API | Rust HTTP crate selected in Phase 1 | Do not add a server dependency before the API phase |
 | Storage | SQLite | Single-host durability with no database service |
 | UI | server-rendered HTML, CSS, ES modules | No frontend build system until needed |
-| Isolation | Firecracker + jailer | Required microVM boundary |
+| Isolation | Firecracker + jailer v1.16.1 | Required pinned microVM boundary |
 | Guest channel | AF_VSOCK | Avoid a guest NIC and make mediation unavoidable |
 | Model gateway | host gateway (OpenAI-compatible) | One proxy; name routing and policy live in core |
 | Model adapter | optional, e.g. LiteLLM, inside a plugin | Only for non-OpenAI-native providers |
@@ -36,7 +36,7 @@ These are implementation choices, not permanent product contracts:
 | Plugins | JSON-RPC 2.0 over stdio | Language-neutral and process-isolated |
 | Telemetry | OpenTelemetry | Open traces, metrics, and logs |
 
-Avoid a Go plugin ABI, gRPC, message broker, Redis, PostgreSQL, frontend
+Avoid an in-process plugin ABI, gRPC, message broker, Redis, PostgreSQL, frontend
 framework, and dependency-injection framework in v0.1.
 
 ### 2.1 Extension rule
@@ -60,9 +60,7 @@ authorization, audit, and transaction ownership remain in the daemon.
 Create directories only when their phase begins:
 
 ```text
-cmd/microorchestrator/    daemon entrypoint
-internal/                 core packages, kept shallow
-guest/                    trusted init/harness and guest image inputs
+src/                      daemon entrypoint and trusted guest binaries
 plugins/                  first-party plugin executables
 policies/                 default Rego bundle and tests
 web/                      HTML, CSS, and ES modules
@@ -86,12 +84,15 @@ Build a small command that reports:
 - cgroup v2;
 - Firecracker/jailer versions and hashes;
 - vsock support;
-- required disk space.
+- at least 10 GiB free on the working filesystem for the feasibility assets.
 
 Check: command exits non-zero with a useful reason on an incompatible host.
 
 ### 4.2 Jailed hello-world microVM
 
+- Use Firecracker CI kernel 6.1.155 and Ubuntu 24.04 guest filesystem with
+  repository-pinned SHA-256 hashes for the feasibility spike.
+- Build the trusted feasibility guest helper in Rust, matching the host daemon.
 - Boot a pinned kernel and read-only base rootfs through the jailer.
 - Start an unprivileged guest process.
 - Apply CPU, memory, PID, file-descriptor, disk, and runtime limits.
@@ -101,6 +102,7 @@ Check: guest prints a nonce over vsock and cannot alter the base disk.
 
 ### 4.3 Bidirectional vsock proxy
 
+- Use a 4 KiB request ceiling for the feasibility protocol.
 - Host sends a request to a loopback HTTP service in the guest.
 - Guest sends a request to a host test service.
 - Route guest outbound HTTP through a loopback forward proxy that crosses vsock
@@ -116,6 +118,8 @@ second VM cannot impersonate it.
 
 ### 4.4 OCI artifact spike
 
+- Use the upstream `a2aproject/a2a-samples` Python hello-world agent at commit
+  `6603ba3f2c31a7ef33e70b9d8b5b5f8be42ac9a3`.
 Compare only two concrete paths:
 
 1. Materialize an OCI image into a read-only rootfs/block device.
@@ -126,11 +130,11 @@ Choose the shorter reliable path. Record boot latency, disk amplification,
 cleanup behavior, and required privileged operations. Do not build a general
 artifact abstraction during the spike.
 
-Check: run one existing OpenAI-compatible sample agent image without modifying
-its contents.
+Check: run one existing A2A sample agent image without modifying its contents.
 
 ### 4.5 Governance spike
 
+- Pin the feasibility evaluator to OPA v1.20.1.
 - Build one ACS-compatible snapshot for a model request.
 - Evaluate one Rego bundle.
 - Exercise allow, deny, and timeout/fail-closed behavior.
@@ -444,6 +448,16 @@ Append here in the same change that edits SPEC.md or PLAN.md.
 
 | Date | Decision | Why |
 |---|---|---|
+| 2026-08-29 | Defer the Rust HTTP crate choice until Phase 1 | Phase 0 has no HTTP API, so selecting and adding a server dependency now would be speculative |
+| 2026-08-29 | Select direct OCI rootfs materialization over in-guest `runc` | The measured path booted an unmodified A2A agent in 2.7 seconds; `runc` adds runtime and namespace plumbing inside an already isolated microVM |
+| 2026-08-29 | Use the pinned upstream A2A Python hello-world sample for the OCI spike | It is a small credential-free standard agent and keeps workload language independent from the Rust host |
+| 2026-08-29 | Bound Phase 0 vsock test requests to 4 KiB | Small fixed messages are enough to prove streaming, cancellation, timeout, and isolation before protocol framing exists |
+| 2026-08-29 | Pin the Phase 0 governance evaluator to OPA v1.20.1 | Makes the ACS/Rego feasibility result reproducible with an official checksum-verified binary |
+| 2026-08-29 | Replace Go with Rust for the host daemon and trusted guest harness; browser UI remains HTML/CSS/JavaScript | Keeps low-level host and guest code on one memory-safe toolchain without imposing the rule on native browser code |
+| 2026-08-29 | Use Go for both the host and trusted guest harness; do not add C or Rust | One toolchain is enough for static Linux binaries and vsock syscalls |
+| 2026-08-29 | Pin the Phase 0 guest spike to Firecracker CI Linux 6.1.155 and Ubuntu 24.04 assets by SHA-256 | Uses known Firecracker-compatible inputs without creating a guest-image build system |
+| 2026-08-29 | Pin Phase 0 Firecracker and jailer to v1.16.1 and document host setup in `README.md` | Reproducible KVM access, binary installation, and checksum verification must precede VM spikes |
+| 2026-08-29 | Start Phase 0 with `microorchestrator host-check` and require 10 GiB free working storage | Proves host incompatibility early without scaffolding later runtime phases; 10 GiB leaves room for the first pinned kernel, rootfs, and OCI spike |
 | 2026-08-29 | Add a default-deny HTTP(S) egress proxy in the harness (SPEC §8.5) | Keeps the zero-code contract honest: outbound URLs become policy decisions, not silent failures |
 | 2026-08-29 | Host gateway is the single OpenAI-compatible endpoint; LiteLLM demoted to an optional per-plugin adapter | v0.1 backends are OpenAI-native, so a second proxy was redundant; removes a process and config-reload machinery |
 | 2026-08-29 | Standardize component name on "host gateway"; reserve "governance middleware" for the §8.7 pipeline | Terminology was inconsistent and conflated component with pipeline |

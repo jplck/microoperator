@@ -87,10 +87,15 @@
 1. Locate the relevant `SPEC.md` requirement and `PLAN.md` phase.
 2. Use `.github/skills/spec-sync/SKILL.md` for architecture or scope changes.
 3. Implement only the current requirement; do not pre-build later phases.
-4. Reuse open standards and upstream APIs rather than wrapping them.
-5. Run the smallest existing check that proves success and the relevant failure
+4. Use Rust for the host daemon and trusted guest harness. Browser UI code may
+   use native HTML, CSS, and JavaScript and does not need to match the systems
+   language.
+5. Reuse open standards and upstream APIs rather than wrapping them.
+6. Run the smallest existing check that proves success and the relevant failure
    path.
-6. Confirm documentation, schemas, and behavior still agree before completion.
+7. Confirm documentation, schemas, and behavior still agree before completion.
+8. Document every host dependency, permission change, pinned version, checksum
+   verification, and install command in `README.md` in the same change.
 
 Until implementation files exist, do not invent build commands. Add only
 commands that have been run successfully.

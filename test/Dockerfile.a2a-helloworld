@@ -1,0 +1,9 @@
+FROM python:3.12-alpine@sha256:d09d15e60962ca365d1cd544a48773bac9d33f2fb1b00f2aa0deec78ade7dc31
+
+WORKDIR /agent
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY __main__.py agent_executor.py ./
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENTRYPOINT ["python", "/agent/__main__.py"]
