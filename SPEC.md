@@ -61,35 +61,113 @@ only in out-of-process plugins.
 
 ## 4. System boundary
 
-```text
-Browser
-  |
-  v
-microorchestrator daemon
-  - HTTP API and static UI
-  - desired/current state reconciler
-  - SQLite repository
-  - plugin supervisor
-  - microVM supervisor
-  - A2A/MCP/model policy gateway
-  - event and OTel emitter
-  |
-  +---- LiteLLM ---- remote model endpoint
-  |        |
-  |        +-------- local llama.cpp model server
-  |
-  +---- provider plugins ---- Foundry or another environment
-  |
-  +---- Firecracker + jailer
-            |
-            +---- agent microVM
-                    - trusted guest init/harness
-                    - unmodified OCI agent workload
+```mermaid
+flowchart LR
+    Operator["Operator browser"]
+
+    subgraph Host["Linux host"]
+        subgraph Daemon["microorchestrator daemon"]
+            API["HTTP API + static UI"]
+            Core["registry + reconciler"]
+            VMSupervisor["microVM supervisor"]
+            PluginSupervisor["plugin supervisor"]
+
+            subgraph DataPlane["governed data plane"]
+                Vsock["AF_VSOCK gateway"]
+                Principal["host-verified principal<br/>agent + user + delegation"]
+                Adapters["A2A | MCP | OpenAI adapters"]
+                Policy["ACS snapshot + verdict<br/>fail closed"]
+                Router["edge router"]
+                AgentTool["agent-as-tool bridge<br/>A2A skill as MCP tool"]
+            end
+
+            Audit["audit + events"]
+            Telemetry["OpenTelemetry"]
+        end
+
+        SQLite[("SQLite")]
+        OPA["OPA / Rego"]
+
+        subgraph VM["Firecracker microVM per agent"]
+            Harness["trusted guest harness"]
+            Workload["unmodified OCI agent"]
+        end
+
+        subgraph Isolated["isolated host processes"]
+            LiteLLM["LiteLLM"]
+            LocalModel["llama.cpp"]
+            MCPServer["local MCP server"]
+
+            subgraph Plugins["JSON-RPC plugins"]
+                EnvironmentPlugin["environment"]
+                IdentityPlugin["identity-provider"]
+                ModelPlugin["model-provider"]
+                DeferredPlugins["deferred: policy-engine<br/>annotator | secret-provider<br/>approval-channel"]
+            end
+        end
+
+        PluginHarness["plugin development harness<br/>schemas + fixtures + fake host + check"]
+    end
+
+    subgraph External["external systems"]
+        RemoteAgent["remote A2A agent"]
+        RemoteMCP["remote MCP server"]
+        RemoteModel["remote model endpoint"]
+        Foundry["Microsoft Foundry"]
+        Keycloak["Keycloak"]
+        Entra["Microsoft Entra Agent ID"]
+        SPIRE["SPIFFE / SPIRE"]
+        Registry["OCI registry"]
+        HuggingFace["Hugging Face"]
+        OTelBackend["OTel backend"]
+    end
+
+    Operator --> API
+    API --> Core
+    Core <--> SQLite
+    Core --> VMSupervisor
+    VMSupervisor --> Harness
+    Registry --> VMSupervisor
+    Workload <--> Harness
+    Harness <-->|"only guest communication"| Vsock
+
+    Vsock --> Principal --> Adapters --> Policy
+    Policy --> OPA
+    OPA --> Policy
+    Policy -->|"allow / transform"| Router
+    Policy -->|"decision"| Audit
+    Router -->|"A2A"| Vsock
+    Router -->|"A2A"| RemoteAgent
+    Router -->|"MCP"| MCPServer
+    Router -->|"MCP"| RemoteMCP
+    Router -->|"model"| LiteLLM
+    Router -->|"agent as tool"| AgentTool -->|"A2A"| Vsock
+
+    LiteLLM --> LocalModel
+    LiteLLM --> RemoteModel
+    Audit --> Telemetry --> OTelBackend
+
+    Core --> PluginSupervisor
+    PluginSupervisor --> EnvironmentPlugin
+    PluginSupervisor --> IdentityPlugin
+    PluginSupervisor --> ModelPlugin
+    PluginSupervisor -.-> DeferredPlugins
+    EnvironmentPlugin --> Foundry
+    IdentityPlugin --> Keycloak
+    IdentityPlugin --> Entra
+    SPIRE -->|"JWT-SVID federation"| IdentityPlugin
+    ModelPlugin --> HuggingFace
+    ModelPlugin --> LocalModel
+    PluginHarness -.-> EnvironmentPlugin
 ```
 
 The control plane and data plane are logical modules in one daemon for v0.1.
 They may be split only after measured load or availability requirements justify
 another process.
+
+Solid arrows are runtime or control paths. Dotted arrows are development-time
+or deferred extension paths. The microVM has no network interface; every
+network-visible agent interaction crosses the vsock gateway and policy path.
 
 ## 5. Host requirements
 
