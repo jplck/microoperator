@@ -436,3 +436,14 @@ One experienced engineer, excluding product design and external certification:
 
 The largest uncertainty is safe OCI execution inside Firecracker, not the
 operator API or UI.
+
+## 15. Decision log
+
+Newest first. One row per accepted design decision that changed the docs.
+Append here in the same change that edits SPEC.md or PLAN.md.
+
+| Date | Decision | Why |
+|---|---|---|
+| 2026-08-29 | Add a default-deny HTTP(S) egress proxy in the harness (SPEC §8.5) | Keeps the zero-code contract honest: outbound URLs become policy decisions, not silent failures |
+| 2026-08-29 | Host gateway is the single OpenAI-compatible endpoint; LiteLLM demoted to an optional per-plugin adapter | v0.1 backends are OpenAI-native, so a second proxy was redundant; removes a process and config-reload machinery |
+| 2026-08-29 | Standardize component name on "host gateway"; reserve "governance middleware" for the §8.7 pipeline | Terminology was inconsistent and conflated component with pipeline |

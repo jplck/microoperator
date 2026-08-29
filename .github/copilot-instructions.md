@@ -42,6 +42,8 @@
 14. Plugin authors receive versioned JSON Schemas, fixtures, a fake host, and a
     conformance command. Schemas are authoritative; language SDKs require two
     maintained plugins with demonstrated duplicate plumbing.
+15. Every accepted design decision is appended to the `PLAN.md` decision log
+    (newest first) in the same change that edits `SPEC.md` or `PLAN.md`.
 
 ## Ponytail rules
 

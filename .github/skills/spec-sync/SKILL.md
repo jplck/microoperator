@@ -40,4 +40,6 @@ license: MIT
    - guest outbound HTTP is default-deny and crosses the harness egress proxy
      to the host gateway.
 6. Reject claims that a sidecar can inspect private in-process function calls.
-7. Report any unresolved contradiction instead of inventing behavior.
+7. Append accepted design decisions to the `PLAN.md` decision log (newest
+   first) in the same change that edits SPEC.md or PLAN.md.
+8. Report any unresolved contradiction instead of inventing behavior.
