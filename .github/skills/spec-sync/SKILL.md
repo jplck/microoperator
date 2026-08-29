@@ -34,6 +34,10 @@ license: MIT
      authorization, audit, or transaction ownership;
    - plugin integration uses the schema, fake host, fixtures, and conformance
      command before adding any language SDK;
-   - LiteLLM routes models but does not execute local model weights.
+   - the host gateway is the single OpenAI-compatible model endpoint; any model
+     adapter (e.g. LiteLLM) is optional and per-plugin, and neither executes
+     local model weights;
+   - guest outbound HTTP is default-deny and crosses the harness egress proxy
+     to the host gateway.
 6. Reject claims that a sidecar can inspect private in-process function calls.
 7. Report any unresolved contradiction instead of inventing behavior.

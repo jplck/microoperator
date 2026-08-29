@@ -19,10 +19,11 @@
 3. Each agent runs in a jailed Firecracker microVM.
 4. Agent artifacts remain unmodified OCI images.
 5. Guest workloads have no general network interface in v0.1; governed traffic
-   crosses the harness, vsock, and host policy gateway.
+   crosses the harness, vsock, and host gateway.
 6. A2A is the agent protocol, MCP is the tool protocol, OpenAI-compatible APIs
    are the model protocol, and OpenTelemetry is the telemetry protocol.
-7. LiteLLM is the model gateway, not the local model-weight runtime.
+7. The host gateway is the single OpenAI-compatible model endpoint; LiteLLM is
+   an optional per-plugin adapter, and neither runs local model weights.
 8. Every observable A2A, MCP, and model interaction is evaluated immediately
    before execution and fails closed.
 9. Private in-process functions cannot be governed without an agent adapter;

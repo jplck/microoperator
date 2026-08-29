@@ -38,7 +38,7 @@ only in out-of-process plugins.
   lifetime limits.
 - Register remote MCP servers and install local MCP server artifacts.
 - Register remote models and install Hugging Face models for local serving.
-- Route every model request through LiteLLM.
+- Route every model request through the host model gateway.
 - Publish and consume A2A agent cards.
 - Create explicit agent-to-agent, agent-to-tool, and agent-to-model edges.
 - Attach policy to global, agent, and edge scopes.
@@ -56,7 +56,8 @@ only in out-of-process plugins.
 - A proprietary agent framework.
 - Arbitrary guest internet access.
 - Transparent inspection of private in-process function calls.
-- Replacing LiteLLM, Firecracker, OPA, MCP, or A2A with custom equivalents.
+- Replacing Firecracker, OPA, MCP, A2A, or the OpenAI-compatible model contract
+  with custom equivalents.
 - A plugin SDK for every possible future extension.
 
 ## 4. System boundary
@@ -94,7 +95,7 @@ flowchart LR
         end
 
         subgraph Isolated["isolated host processes"]
-            LiteLLM["LiteLLM"]
+            ModelAdapter["optional model adapter<br/>(e.g. LiteLLM)"]
             LocalModel["llama.cpp"]
             MCPServer["local MCP server"]
 
@@ -120,6 +121,7 @@ flowchart LR
         Registry["OCI registry"]
         HuggingFace["Hugging Face"]
         OTelBackend["OTel backend"]
+        Internet["allow-listed internet"]
     end
 
     Operator --> API
@@ -140,11 +142,13 @@ flowchart LR
     Router -->|"A2A"| RemoteAgent
     Router -->|"MCP"| MCPServer
     Router -->|"MCP"| RemoteMCP
-    Router -->|"model"| LiteLLM
     Router -->|"agent as tool"| AgentTool -->|"A2A"| Vsock
+    Router -->|"model, OpenAI-compatible"| LocalModel
+    Router -->|"model, OpenAI-compatible"| RemoteModel
+    Router -->|"model, other provider"| ModelAdapter
+    Router -->|"HTTP egress"| Internet
 
-    LiteLLM --> LocalModel
-    LiteLLM --> RemoteModel
+    ModelAdapter --> RemoteModel
     Audit --> Telemetry --> OTelBackend
 
     Core --> PluginSupervisor
@@ -221,12 +225,17 @@ or the agent must voluntarily integrate a runtime policy adapter.
 
 ### 6.3 Model
 
-A Model is a stable public name routed by LiteLLM to:
+A Model is a stable public name routed by the host model gateway to:
 
 - a remote OpenAI-compatible/provider endpoint registered by a plugin; or
 - a local model server installed by a model plugin.
 
-LiteLLM is the model gateway, not the process that executes model weights.
+The host model gateway is the single OpenAI-compatible endpoint. OpenAI-compatible
+backends need no adapter. A non-OpenAI-native provider is adapted by an optional
+model adapter (for example LiteLLM) owned by its `model-provider` plugin, not by
+a mandatory platform process. No component executes model weights except the
+model server itself.
+
 The default local plugin downloads a pinned Hugging Face artifact and starts a
 llama.cpp OpenAI-compatible server. Other runners, such as vLLM, are optional
 future plugins.
@@ -242,11 +251,14 @@ An Edge is an explicit permitted relationship:
 agent -> agent
 agent -> tool
 agent -> model
+agent -> egress destination
 ```
 
 An edge identifies source, target, allowed operation or skill, policy
-references, and optional limits. Creating an edge does not permanently
-authorize traffic; every runtime interaction is evaluated again.
+references, and optional limits. An egress edge names an allowed outbound
+destination (host and port or URL prefix) for the harness proxy. Creating an
+edge does not permanently authorize traffic; every runtime interaction is
+evaluated again.
 
 ### 6.5 Policy
 
@@ -279,6 +291,9 @@ The base guest contains a minimal init/harness outside the agent artifact. It:
 - starts the agent as an unprivileged user;
 - applies process and filesystem limits;
 - exposes loopback protocol endpoints expected by the agent;
+- exposes a loopback HTTP(S) forward proxy and injects `HTTP_PROXY`,
+  `HTTPS_PROXY`, and `NO_PROXY` so standard clients route outbound HTTP through
+  the governed egress path;
 - injects standard endpoint variables and a short-lived host-issued local
   credential;
 - proxies approved traffic over Firecracker `vsock`;
@@ -298,11 +313,15 @@ An agent is compatible when it:
 - uses injected OpenAI-compatible base URLs for model calls;
 - uses injected MCP endpoints for tool calls;
 - uses discovered A2A card URLs for peer calls;
-- does not require unrestricted outbound networking.
+- routes other outbound HTTP(S) through the injected proxy variables rather than
+  opening raw sockets.
 
-Hard-coded provider URLs fail because the guest has no network interface. The
-harness reports failed egress attempts as a best-effort incompatibility signal;
-it must not claim to identify every incompatible code path.
+Agents that honor standard proxy environment variables reach allow-listed
+destinations through the governed egress path; a hard-coded URL is a policy
+decision, not an automatic failure. The guest still has no network interface, so
+raw sockets and proxy-ignoring clients fail. The harness reports failed direct
+egress as a best-effort incompatibility signal and must not claim to identify
+every incompatible code path.
 
 ## 8. Communication
 
@@ -315,16 +334,20 @@ network level:
 Agent A
   -> guest harness
   -> vsock
-  -> host policy gateway
+  -> host gateway
   -> vsock
   -> Agent B guest harness
   -> Agent B
 ```
 
 The operator configures registry, routing, identity, and policy. Its control
-API is not called as part of an A2A conversation. In v0.1 the policy gateway is
+API is not called as part of an A2A conversation. In v0.1 the host gateway is
 a module in the same daemon, but has a separate internal interface and bounded
 queues.
+
+The **host gateway** is the single mediation point every governed interaction
+crosses: it authenticates the source, evaluates policy through the governance
+middleware (§8.7), routes to the target backend, governs egress, and audits.
 
 ### 8.2 A2A
 
@@ -345,7 +368,7 @@ Explicit peer edges and stable skill IDs are sufficient.
 ### 8.3 MCP
 
 - Agents receive only MCP servers attached by explicit edges.
-- MCP requests pass through the host policy gateway.
+- MCP requests pass through the host gateway.
 - Policy sees caller, server, tool name, sanitized arguments metadata, labels,
   delegation context, and current limits.
 - Tool results return through the same path for optional result labeling or
@@ -355,15 +378,27 @@ Explicit peer edges and stable skill IDs are sufficient.
 ### 8.4 Models
 
 - Agents call a loopback OpenAI-compatible endpoint exposed by the harness.
-- The host evaluates `pre_model_call` policy and forwards allowed requests to
-  LiteLLM.
-- LiteLLM resolves the stable model name to a local or remote backend.
+- The host evaluates `pre_model_call` policy and resolves the stable model name
+  to a local or remote backend.
+- OpenAI-compatible backends are called directly. A non-OpenAI-native provider
+  is reached through the optional model adapter of its `model-provider` plugin.
 - The response crosses an optional `post_model_call` policy before returning.
 - Streaming is authorized once before opening the stream. Individual tokens are
   not separately authorized.
 - A retry is a new interaction and receives a new policy decision.
 
-### 8.5 Network enforcement
+### 8.5 Egress
+
+- The harness exposes a loopback HTTP(S) forward proxy and injects
+  `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`.
+- Outbound HTTP(S) crosses vsock to the host gateway and is evaluated against
+  egress edges before any external connection.
+- Egress is default-deny. Only destinations named by an egress edge are allowed.
+- The proxy governs HTTP(S) by destination; it does not open a general network
+  path. Raw sockets and proxy-ignoring clients still cannot reach the network.
+- Allowed egress is audited with source identity, destination, and trace ID.
+
+### 8.6 Network enforcement
 
 Agent microVMs have no TAP/NIC in v0.1. `vsock` is the only host communication
 channel. Each VM receives a dedicated host-side vsock Unix socket and
@@ -374,7 +409,7 @@ If a future feature adds guest networking, it must be default-deny and enforced
 with a per-VM network namespace and nftables. Firecracker itself does not filter
 guest egress.
 
-### 8.6 Protocol governance middleware
+### 8.7 Protocol governance middleware
 
 A single host middleware pipeline wraps every A2A, MCP, and model route:
 
@@ -494,7 +529,7 @@ policy explicitly requires content classification.
 Policies may request a classifier, model, or HTTP annotator. Annotators produce
 labels; they do not authorize. Rego makes the final decision.
 
-Annotator model calls also pass through the model policy gateway under a
+Annotator model calls also pass through the host gateway under a
 dedicated system identity to prevent recursive unbounded evaluation.
 
 ### 10.5 Initial policy families
@@ -516,9 +551,9 @@ enforcement path works.
 ### 10.6 Unavoidable enforcement
 
 - The guest has no general network path around the harness and host gateway.
-- LiteLLM, local model servers, local MCP servers, and plugins run in dedicated
-  host network namespaces. Their routes accept traffic only from the host
-  gateway; they cannot reach the operator API.
+- Local model servers, any optional model adapter, local MCP servers, and
+  plugins run in dedicated host network namespaces. Their routes accept traffic
+  only from the host gateway; they cannot reach the operator API.
 - Local agent endpoints are reachable only through their harness/vsock route.
 - Provider plugins never return raw credentials to workloads.
 
@@ -631,18 +666,23 @@ These plugins are optional. The core must build, test, and run without them.
 Keycloak and Entra may accept a SPIFFE JWT-SVID as a federated workload
 credential when configured; SPIRE is not required by the core.
 
-## 12. LiteLLM
+## 12. Model gateway and optional adapters
 
-LiteLLM provides the single OpenAI-compatible model endpoint, stable model
-names, backend routing, retries, usage, and provider adaptation.
+The host gateway is the single OpenAI-compatible model endpoint. It owns stable
+model names, backend resolution, `pre_model_call`/`post_model_call` policy,
+usage accounting, and audit. microorchestrator does not run a second model proxy
+in the required path.
 
-microorchestrator owns desired model state and generates LiteLLM configuration
-from SQLite. It reloads or restarts LiteLLM after an atomic configuration
-change. LiteLLM's database-backed management API and Admin UI are disabled, so
-the system does not require PostgreSQL or create a second source of truth.
+OpenAI-compatible backends (llama.cpp and OpenAI-compatible remote endpoints)
+are called directly. A non-OpenAI-native provider (for example Anthropic
+Messages, Bedrock, or Vertex) is adapted by an optional model adapter owned by
+its `model-provider` plugin. LiteLLM is one such adapter, used only inside a
+plugin when native-API translation is required; it is not a core process and
+does not require PostgreSQL.
 
-LiteLLM virtual keys may identify microorchestrator, but workload authorization
-is performed by the host policy gateway using the verified microVM identity.
+Backend credentials stay with the host or the provider plugin. Workload
+authorization is performed by the host gateway using the verified microVM
+identity.
 
 ## 13. Operator API and UI
 
@@ -760,7 +800,7 @@ v0.1 is complete when:
 3. An unmodified compatible OCI agent starts in a jailed Firecracker microVM.
 4. The agent cannot reach an arbitrary internet address.
 5. The UI installs one pinned Hugging Face model and serves it through
-   llama.cpp and LiteLLM under a stable model name.
+   llama.cpp under a stable model name.
 6. The same agent can call a registered remote model without changing its
    image.
 7. Two agents discover cards and exchange streaming A2A messages.
@@ -783,8 +823,7 @@ The implementation plan must validate these before committing:
 
 - OCI image materialization into a Firecracker workload disk.
 - Reliable host-to-guest and guest-to-host streaming over vsock.
-- Whether LiteLLM configuration can be reloaded atomically while SQLite remains
-  the sole model source of truth.
+- Whether any non-OpenAI-native provider adapter is needed before v0.1 ships.
 - llama.cpp model format selection and safe Hugging Face license acceptance.
 - ACS/AGT version stability; it is currently public preview and ACS is draft.
 - Approval persistence and recovery semantics.

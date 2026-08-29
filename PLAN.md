@@ -27,7 +27,8 @@ These are implementation choices, not permanent product contracts:
 | UI | server-rendered HTML, CSS, ES modules | No frontend build system until needed |
 | Isolation | Firecracker + jailer | Required microVM boundary |
 | Guest channel | AF_VSOCK | Avoid a guest NIC and make mediation unavoidable |
-| Model gateway | LiteLLM Proxy | Existing OpenAI-compatible routing and provider support |
+| Model gateway | host gateway (OpenAI-compatible) | One proxy; name routing and policy live in core |
+| Model adapter | optional, e.g. LiteLLM, inside a plugin | Only for non-OpenAI-native providers |
 | Local model runner | llama.cpp server | Small standalone local inference runtime |
 | Governance | ACS-compatible snapshots/verdicts + OPA/Rego | Open, deterministic, fail-closed policy |
 | Agent protocol | A2A and OpenAI Responses API | Portable agent interoperability |
@@ -102,6 +103,8 @@ Check: guest prints a nonce over vsock and cannot alter the base disk.
 
 - Host sends a request to a loopback HTTP service in the guest.
 - Guest sends a request to a host test service.
+- Route guest outbound HTTP through a loopback forward proxy that crosses vsock
+  to the host gateway; confirm proxy-ignoring clients still reach no network.
 - Verify streaming, cancellation, timeout, and bounded message sizes.
 - Boot without a network interface.
 - Bind workload identity to the dedicated host-side vsock Unix socket and
@@ -134,16 +137,6 @@ its contents.
 - Confirm policy digest and trace ID appear in the decision event.
 
 Check: denied traffic never reaches the fake upstream.
-
-### 4.6 LiteLLM state spike
-
-- Generate a minimal LiteLLM config from test state.
-- Reload or restart LiteLLM atomically without enabling its database-backed
-  model management.
-- Confirm model listing and one Responses API request work without PostgreSQL.
-
-Check: SQLite remains the only database and a failed config change leaves the
-last working LiteLLM process and configuration active.
 
 ### Exit
 
@@ -185,14 +178,16 @@ Estimated effort: 8-12 engineer-days.
 - Trusted PID 1/supervisor.
 - Run workload unprivileged.
 - Inject standard endpoint variables.
-- Proxy Responses/A2A ingress and model egress over vsock.
+- Inject `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` for the loopback egress proxy.
+- Proxy Responses/A2A ingress, model egress, and allow-listed HTTP egress over
+  vsock.
 - Forward bounded logs and health.
 
 ### 5.5 Model path
 
-- Start LiteLLM as a supervised host process.
+- Route model requests directly through the host gateway (no separate proxy).
 - Register one existing OpenAI-compatible remote endpoint.
-- Route an agent request through pre-model policy to LiteLLM.
+- Route an agent request through pre-model policy to the gateway.
 - Return streaming output through post-model policy when configured.
 
 ### 5.6 Minimal UI
@@ -231,7 +226,7 @@ language duplicate the same protocol plumbing.
 - Download resumably into content-addressed storage.
 - Verify expected files and hashes.
 - Start a pinned llama.cpp server with calibrated CPU/GPU settings.
-- Register the stable model name with LiteLLM.
+- Register the stable model name with the host gateway.
 - Remove only unreferenced artifacts.
 
 Check: install, run, stop, restart, and remove one small permissively licensed
@@ -268,7 +263,7 @@ Estimated effort: 7-10 engineer-days.
 - Route A2A send and stream operations:
 
   ```text
-  Agent A -> harness/vsock -> host policy gateway -> vsock/harness -> Agent B
+  Agent A -> harness/vsock -> host gateway -> vsock/harness -> Agent B
   ```
 
 - Preserve trace and task context.
@@ -417,7 +412,7 @@ Before a release:
 | OCI is not a native Firecracker workload format | Prove one materialization path before core design |
 | Guest harness can be confused with agent-integrated governance | Document observable network boundary honestly |
 | Sidecar/proxy cannot see private function calls | Require MCP or voluntary runtime adapter |
-| LiteLLM is mistaken for a local inference engine | Keep llama.cpp as the default runner |
+| An optional model adapter is mistaken for a core requirement | Route OpenAI-native backends directly; add an adapter only per provider plugin |
 | Policy evaluation blocks all traffic when unavailable | Local evaluation, bounded latency, fail closed |
 | Stateful limits are incorrectly placed in OPA | Keep counters and approvals in SQLite/daemon |
 | Plugin API becomes a speculative framework | Add methods only for shipping plugins |
