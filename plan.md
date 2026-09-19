@@ -35,8 +35,8 @@ another's data. Creating a system does not launch another daemon.
   event subscriptions, and limits. An agent does not require its own codebase.
 - Agent-generated code runs out of process. Never load generated Go plugins or
   generated code into the daemon.
-- Transport is replaceable because that is an explicit requirement. Do not make
-  scheduling, memory, and every internal function into a plugin system.
+- Keep agent communication behind one event-delivery boundary. Do not add alternate
+  peer protocols or make scheduling, memory, and every function into a plugin system.
 - Start as a single-user, single-machine system. Do not claim hostile multi-tenant
   isolation or distributed fault tolerance.
 
@@ -52,7 +52,7 @@ another's data. Creating a system does not launch another daemon.
   | Agent/tool records + immutable revisions                  |
   | Supervisor + durable task/mailbox scheduler              |
   | Capability checks + approvals + shared LLM limits         |
-  | Governed message router / A2A adapter                     |
+  | Governed event router / durable mailboxes                 |
   | Model broker / tool broker / memory access                |
   | SQLite: state, events, deliveries, grants, audit           |
   +------------+-------------------+-------------------------+
@@ -221,9 +221,9 @@ global broadcast every agent can read. A recipient can reject a task or request
 more input. An agent may propose a different team, but acceptance and spawning are
 separate governed actions.
 
-Task work uses A2A concepts where useful: messages, task IDs, conversation/context
-IDs, status updates, and artifacts. Runtime events also cover things that are not
-A2A tasks, such as a timer becoming due or a memory collection changing.
+Tasks are coordinated by addressed events carrying task IDs, status updates, and
+artifact references. The same mechanism carries timers, tool completions, and
+memory-change notifications.
 
 Persist an explicit task state: queued, running, waiting for input/result/approval,
 completed, failed, canceled, or rejected. Worker exit is not task completion.
@@ -252,58 +252,16 @@ agent A -> send request -> permission checks -> durable acceptance
 message. It does not mean an unobserved worker-to-worker socket. Arbitrary peer
 networking would defeat the governance requirement and is denied.
 
-The router initially delivers through local SQLite-backed mailboxes and worker IPC.
-Keep the delivery boundary small enough to add an A2A network adapter later. Both
-inbound and outbound network adapters must pass the same runtime permission checks;
-using an adapter must never become a privileged alternate route.
+The router delivers through local SQLite-backed mailboxes and sandboxed worker IPC.
+This is the only agent-to-agent communication mechanism in v1. Keep authorization,
+durable acceptance, and delivery in that path; there are no per-agent network
+servers or external agent-protocol adapters.
 
 > **Reminder for later:** Review the router/broker/eventing trust boundary before
 > enabling privileged delegation. Prevent confused-deputy bypasses: bind sender
 > identity to the session, constrain delegated work to its task grant, and authorize
 > returned data. Wakeups must never execute agent code inside the daemon. Add denial
 > checks demonstrating these boundaries; nono alone does not enforce them.
-
-A2A is the interoperability protocol for delegation and task updates, not the
-internal persistence engine, cron implementation, or authorization mechanism.
-Map interoperable task messages explicitly; do not pretend arbitrary internal
-events are portable A2A operations.
-
-### A2A boundary
-
-The official [A2A Go SDK](https://github.com/a2aproject/a2a-go) supports the protocol
-and has transport/interceptor hooks. The researched baseline is A2A specification
-1.0.1 and Go SDK v2.5.0 (`github.com/a2aproject/a2a-go/v2`); protocol negotiation
-uses `1.0`, not the SDK's major version.
-
-| Runtime concept | A2A representation |
-| --- | --- |
-| Discoverable approved agent | Agent Card with interfaces, skills, and authentication requirements |
-| Delegation / follow-up | Message and task/context association |
-| Long-running work | Task with status updates and artifacts |
-| Results and progress | Task retrieval, streaming, or negotiated notifications |
-| Timer, subscription, memory change, agent creation | Runtime API/event, not a fabricated A2A standard operation |
-
-The first network adapter uses one standard HTTP binding, not a new wire protocol.
-Publish stable per-agent routes on the daemon rather than opening a server in every
-worker. Use the SDK's transport seam and server interceptor, but enforce permissions
-at the runtime dispatch boundary too. An Agent Card is not proof of identity.
-
-Keep local mailbox/IPC delivery explicit as a custom internal transport; do not
-advertise it as a standard A2A binding. A network adapter must map local/external
-task IDs, persist received state, authenticate peers, enforce data-sharing grants,
-and preserve task/error semantics. Internal approval waiting is not automatically
-A2A `auth-required`; map only semantically matching states.
-
-A2A streaming and push notifications are capability-dependent. The specification
-does not promise replay of missed updates or durable delivery, and the Go SDK's
-default task store is in memory. Supply a SQLite-backed store when enabling the
-adapter; use task reconciliation after disconnection. Do not claim an end-to-end
-at-least-once guarantee merely because the local mailbox has one.
-
-Only enable external destinations and webhook callbacks from approved configuration.
-Validate callback/artifact URLs, redirects, and allowed network destinations; do
-not turn A2A notifications into arbitrary host requests. Use TLS and authenticated
-transport for production network bindings.
 
 ### Delivery guarantees
 
@@ -539,8 +497,8 @@ autonomous generated code.
 
 The threat boundary is an agent/code process against the host resources it was
 not granted. It does not protect against a compromised host administrator or a
-kernel exploit. Local controls cannot enforce what a remote model or remote A2A peer
-does after receiving authorized data.
+kernel exploit. Local controls cannot enforce what a remote model or external tool
+service does after receiving authorized data.
 
 ## 9. Memory and learning
 
@@ -716,7 +674,6 @@ These are implementation gates, not a request to build now.
 | 3. Wakeups | Timers, cron, subscriptions, pause/cancel, event limits | Restart, missed cron runs, revocation, event storms, and queue limits are exercised |
 | 4. Memory + UI | Scoped retrieval and detached UI for system controls, shared tool access, and approvals | Two systems can be controlled independently; follow-up input survives pause/restart; repeated commands do not duplicate work; tool grants and approval replay checks hold; daemon remains usable without UI |
 | 5. Generated extensions | System-local tool proposals, Go build/test/promote/assign/rollback, and local Tools view | Shared/local grants and visibility hold; failed candidates stay quarantined; only assigned approved versions run; publication is explicit |
-| 6. Interoperability | A2A adapter; external model gateway only if needed | Protocol mapping preserves semantics; no adapter bypasses permissions; a configured gateway preserves accounting and retry behavior |
 
 Use Go's standard test runner when implementation begins. Each phase needs a small
 set of executable checks for its boundary and failure modes, not a new test framework.
@@ -735,7 +692,7 @@ outgrow explicit runtime checks. Consider an external LLM gateway when multiple
 clients need shared upstream limits, not simply because agents run concurrently.
 
 Keep the extension points the experiment actually needs: configurable agent/tool
-definitions, governed message delivery with an A2A adapter, and configurable model
+definitions, governed event delivery through durable mailboxes, and configurable model
 endpoints with shared rate limits.
 
 ## 15. Research baseline and primary sources
@@ -748,14 +705,12 @@ The binding snapshot is nono-go commit
 `9ba65a11c842eed3644dcd2fb008a4a3f119f680`; its cited Linux-amd64 library records
 native core commit `1d1c88c9f98f0a1f3ff79cff1509713aaec7cdb0` (0.65.1).
 Upstream nono v0.78.0 documentation is comparison material, not evidence of binding
-feature parity. The retained A2A baseline is specification v1.0.1 and Go SDK v2.5.0.
-The binding requires Go 1.24+ and a C toolchain; the cited A2A module requires
-Go 1.25. Pin a compatible toolchain and native artifacts.
+feature parity. The binding requires Go 1.24+ and a C toolchain; choose a project
+toolchain compatible with all selected dependencies when implementation begins.
+Pin the toolchain and native artifacts.
 
 | Topic | Primary source |
 | --- | --- |
 | Upstream CLI network controls, not binding guarantees | [Networking, v0.78.0](https://github.com/nolabs-ai/nono/blob/v0.78.0/docs/cli/features/networking.mdx) |
 | nono Linux/macOS enforcement | [Landlock](https://github.com/nolabs-ai/nono/blob/v0.78.0/docs/cli/internals/landlock.mdx), [Seatbelt](https://github.com/nolabs-ai/nono/blob/v0.78.0/docs/cli/internals/seatbelt.mdx), [security model](https://github.com/nolabs-ai/nono/blob/v0.78.0/docs/cli/internals/security-model.mdx) |
 | nono-go API, build requirements, and native version | [Pinned README](https://github.com/nolabs-ai/nono-go/blob/9ba65a11c842eed3644dcd2fb008a4a3f119f680/README.md), [Apply and support API](https://github.com/nolabs-ai/nono-go/blob/9ba65a11c842eed3644dcd2fb008a4a3f119f680/nono.go), [bundled core version](https://github.com/nolabs-ai/nono-go/blob/9ba65a11c842eed3644dcd2fb008a4a3f119f680/internal/clib/linux_amd64/VERSION), [native core manifest](https://github.com/nolabs-ai/nono/blob/1d1c88c9f98f0a1f3ff79cff1509713aaec7cdb0/crates/nono/Cargo.toml) |
-| A2A operations, transports, task semantics, and notification limits | [Specification, v1.0.1](https://github.com/a2aproject/A2A/blob/v1.0.1/docs/specification.md) |
-| Official A2A Go transport, middleware, and default storage | [Client transport, v2.5.0](https://github.com/a2aproject/a2a-go/blob/v2.5.0/a2aclient/transport.go), [server middleware](https://github.com/a2aproject/a2a-go/blob/v2.5.0/a2asrv/middleware.go), [server defaults](https://github.com/a2aproject/a2a-go/blob/v2.5.0/a2asrv/handler.go), [Go module](https://github.com/a2aproject/a2a-go/blob/v2.5.0/go.mod) |

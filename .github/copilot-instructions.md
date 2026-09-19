@@ -14,7 +14,8 @@
 
 - Prefer Go's standard library, existing helpers, and native OS facilities.
 - Avoid speculative interfaces, factories, configuration, packages, and dependencies.
-  Keep the explicitly required message-transport boundary replaceable.
+  Keep agent communication on the durable event/mailbox path; do not add alternate
+  peer protocols or network adapters without a new requirement.
 - Make surgical changes; preserve unrelated work. Explain only non-obvious choices.
 - Mark deliberate shortcuts with a short `// ponytail:` comment naming the limit
   and when to replace it. Never use simplification to remove safety or validation.

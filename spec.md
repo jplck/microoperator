@@ -345,10 +345,10 @@ by schedule/occurrence. Standing work beyond a goal's lifetime needs explicit gr
 Enforce system/goal event budgets, causation depth, and activation limits to prevent
 feedback loops. New agents and event IDs must not reset allowances.
 
-Keep delivery replaceable. A later A2A adapter maps Agent Cards, messages, tasks,
-status, and artifacts using the official Go SDK. Internal timers and memory events
-are not A2A operations. Adapters preserve authorization and durable state; remote
-streaming/notifications do not inherit local delivery guarantees.
+Agent-to-agent communication uses only the durable event router, local mailboxes,
+and sandboxed worker IPC in v1. Do not add per-agent network servers or external
+agent-protocol adapters. The user-facing API and provider/tool integrations do not
+create alternate peer communication paths.
 
 ## 5. LLM admission and permissions
 
