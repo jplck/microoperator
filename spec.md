@@ -1,7 +1,10 @@
 # Microoperator: technical specification
 
-Design contract; no implementation yet. See [plan.md](plan.md) for rationale and
-dependency research. "Must" denotes an implementation requirement.
+Target design contract. A diagnostic macOS worker-launch spike is implemented;
+see [README.md](README.md) for commands, verified scope, and unresolved native
+confinement limitations. It is not yet approved for untrusted agent code.
+See [plan.md](plan.md) for rationale and dependency research.
+"Must" denotes an implementation requirement, not a claim of completed functionality.
 
 ## 1. Runtime and isolation
 

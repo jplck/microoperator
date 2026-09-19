@@ -4,6 +4,8 @@
 
 - Read [spec.md](../spec.md) for the implementation contract and relevant sections
   of [plan.md](../plan.md) for rationale. The spec takes precedence over the plan.
+- Use [implementation-plan.md](../implementation-plan.md) for milestone status,
+  dependencies, and acceptance checks. Do not treat diagnostic success as qualification.
 - Inspect the actual code and build configuration before changing anything. Do not
   assume planned components already exist. Planning/documentation tasks must not
   bootstrap implementation.

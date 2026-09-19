@@ -1,6 +1,8 @@
 # Microoperator: architecture plan
 
-Status: design only. No runtime implementation.
+Status: target architecture, with a diagnostic macOS worker-launch spike implemented.
+See [README.md](README.md) for commands and qualification limitations, and
+[implementation-plan.md](implementation-plan.md) for implementation status and order.
 
 ## 1. The idea
 
@@ -90,7 +92,7 @@ Apply restrictions on a locked OS thread and immediately exec the worker or tool
 on that same thread, without unlocking or running agent logic in between. This
 avoids treating one restricted Go thread as a sandbox for an already-running
 multithreaded worker. Verify inheritance across exec, new threads, and descendants
-on each supported platform in phase 0.
+on each supported platform through the launch and qualification checks.
 
 `Apply` is irreversible: never call it in the daemon. Reject unsupported profiles
 and exit on setup/apply/exec errors; there is no unsandboxed or CLI fallback.
@@ -662,22 +664,16 @@ agent output as escaped text. No unauthenticated network listener by default.
 The daemon works headlessly. Disconnecting or crashing the UI does not stop a goal
 or approve an action.
 
-## 13. Small implementation sequence
+## 13. Implementation sequence
 
-These are implementation gates, not a request to build now.
+[implementation-plan.md](implementation-plan.md) owns milestone status, dependencies,
+and acceptance checks. It includes the existing diagnostic spike and sequences
+configuration/state, the model broker, the registry, agent events, memory/timers,
+the detached UI, and controlled learning.
 
-| Phase | Smallest useful result | Required evidence before advancing |
-| --- | --- | --- |
-| 0. Boundary spike | nono-go sandbox-exec launcher; scoped broker IPC; explicit permission checks | Pinned native-library provenance, filesystem/network denial, exec/thread/descendant inheritance, required resource caps, capability identity, cancellation, and fail-closed launch verified on the chosen host |
-| 1. Single agent + LLM limits | Daemon, SQLite, CLI goal submission, one prompt agent, shared tool registry, rate-limited model broker, one tool | Shared RPM/TPM and concurrency caps, queue bounds, streaming/cancellation, throttling cooldowns, retry accounting, and restart-safe budgets exercised against a controllable fake provider; credentials stay out of workers |
-| 2. Small team | Governed agent creation, system/agent tool grants, addressed tasks, durable mailboxes, delegation | Child cannot escalate; two agents exchange artifacts; duplicate delivery and waiting parents behave correctly |
-| 3. Wakeups | Timers, cron, subscriptions, pause/cancel, event limits | Restart, missed cron runs, revocation, event storms, and queue limits are exercised |
-| 4. Memory + UI | Scoped retrieval and detached UI for system controls, shared tool access, and approvals | Two systems can be controlled independently; follow-up input survives pause/restart; repeated commands do not duplicate work; tool grants and approval replay checks hold; daemon remains usable without UI |
-| 5. Generated extensions | System-local tool proposals, Go build/test/promote/assign/rollback, and local Tools view | Shared/local grants and visibility hold; failed candidates stay quarantined; only assigned approved versions run; publication is explicit |
-
-Use Go's standard test runner when implementation begins. Each phase needs a small
-set of executable checks for its boundary and failure modes, not a new test framework.
-Generated extensions can wait until the sandbox and broker boundary are demonstrated.
+Diagnostic spike completion is distinct from permission to run untrusted agents.
+Qualification remains an explicit gate; keep its deferred technical details in
+[README.md](README.md#before-enabling-agent-execution).
 
 ## 14. What deliberately waits
 
@@ -699,7 +695,7 @@ endpoints with shared rate limits.
 
 Checked 19 September 2026. This is source-level compatibility research, not a
 runtime sandbox test or security certification. Pin actual dependencies and
-rerun the phase-0 checks when implementation starts or those dependencies change.
+rerun the launch and qualification checks when those dependencies change.
 
 The binding snapshot is nono-go commit
 `9ba65a11c842eed3644dcd2fb008a4a3f119f680`; its cited Linux-amd64 library records
