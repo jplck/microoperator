@@ -13,7 +13,8 @@ execution; operators propose and coordinate work without administrative authorit
 CLI / optional Go UI -> daemon API
                          |
               supervisor + durable scheduler
-              permission checks + model/tool brokers
+              scoped tool registry + permission checks
+              model/tool brokers
               SQLite + artifact storage
                          |
               nono-go sandboxed worker processes
@@ -38,8 +39,8 @@ unknown fields instead of guessing their meaning.
 
 | Data | Source of truth | How it changes |
 | --- | --- | --- |
-| Providers, model aliases, quota groups, tool definitions, sandbox profiles, launch configurations | Administrative JSON | User edits file and restarts daemon; no hot reload in v1 |
-| Created systems, agent revisions, grants, tasks, usage, memory, approvals | SQLite | Authenticated runtime commands, including UI actions |
+| Providers, model aliases, quota groups, shared tool definitions, sandbox profiles, launch configurations | Administrative JSON | User edits file and restarts daemon; no hot reload in v1 |
+| Created systems, agent revisions, system-local tools, grants, tasks, usage, memory, approvals | SQLite | Authenticated runtime commands, including UI actions |
 | Credentials | Named environment variables in the daemon process | User supplies them outside JSON; never forward to workers or return through the API |
 
 JSON `systems` entries are **named launch configurations**, not running instances.
@@ -95,12 +96,30 @@ invalid endpoint/model below; example quotas are not provider guarantees.
       "network": "blocked"
     }
   },
+  "tools": {
+    "shared.evidence-notes": {
+      "kind": "skill",
+      "version": 1,
+      "description": "Evidence reporting guidance.",
+      "content": "Report sources and distinguish facts from assumptions.",
+      "requires_tools": []
+    }
+  },
   "systems": {
     "research": {
+      "tools": [
+        "runtime.agent.propose",
+        "runtime.task.delegate",
+        "shared.evidence-notes"
+      ],
       "operator": {
         "prompt": "Coordinate tasks and delegate within the granted capabilities.",
         "model": "default",
-        "tools": ["runtime.agent.propose", "runtime.task.delegate"],
+        "tools": [
+          "runtime.agent.propose",
+          "runtime.task.delegate",
+          "shared.evidence-notes"
+        ],
         "sandbox_profile": "worker"
       },
       "limits": {
@@ -119,9 +138,12 @@ a gateway may supply that API. Changing `base_url` does not change the protocol.
 Additional adapters must be explicitly implemented, not inferred from a URL.
 
 `runtime.agent.propose` and `runtime.task.delegate` are built-in broker operations,
-not executables or installed dependencies. Additional tools require an administrative
-registry entry with execution details, schemas, effect class, timeout, capabilities,
-and credential references. Listing a tool name does not install or approve it.
+not executables or installed dependencies. Top-level `tools` defines shared catalog
+entries; a system's `tools` selects its granted set, and each agent's `tools` selects
+a subset. These configuration names resolve to pinned registry references on
+revision creation, not to whichever version is latest when a call executes.
+Listing a tool name does not install or approve it. System-generated entries follow
+the separate registry/promotion path in section 2.6, without editing this JSON.
 
 `max_agents` counts live agents, including the operator; `max_active_agents` caps
 simultaneous activations in that system. `token_budget` is its lifetime aggregate
@@ -181,7 +203,7 @@ defaults for v1, **not user-confirmed requirements**:
 
 | Choice | Working default | Alternative requiring a decision |
 | --- | --- | --- |
-| Administrative settings | JSON owns providers, tools, and profiles; UI manages systems only | JSON bootstrap followed by authenticated UI editing of administrative settings in SQLite |
+| Administrative settings | JSON owns providers, shared tool definitions, and profiles; UI manages systems and local-tool lifecycle | JSON bootstrap followed by authenticated UI editing of administrative settings in SQLite |
 | Host filesystem grants | Private worker directories only; import selected files as scoped inputs | Explicit approved read-only host directories, or explicit read/write host directories |
 
 Do not implement both alternatives as configuration modes preemptively. Before
@@ -198,13 +220,72 @@ directory and cannot bypass protected-path or artifact authorization checks.
 | Agent revision | Identity/lineage, prompt, model, pinned skills/tools, memory scopes, wakeups, grants, limits |
 | Task | System/goal/agent, pinned revision, status, continuation, pending/completed call IDs |
 | Event | ID/type/version, system, authenticated source, destination, goal/task, correlation/causation, timestamp/expiry, bounded payload or artifact reference |
-| Tool revision | Executable or approved integration, schemas, effect class, capabilities, timeout, artifact digest |
+| Tool revision | ID/version, shared or system scope, owner/provenance, kind, manifest/content digest, required capabilities/dependencies, lifecycle state |
 
 Revisions are immutable. New tasks select the active revision; running/waiting tasks
 remain pinned unless explicitly migrated. Revocations still apply to pinned work.
 Skills are read-only instructions, never permission grants. Agent creation is a
 validated runtime request; child capabilities cannot exceed the creator's
 delegable grant. Descendants share goal and system budgets.
+
+### 2.6. Central tool registry
+
+"Tools" includes both executable tools and skills. Maintain one daemon-owned
+registry API with scoped entries, not separate registries per worker:
+
+| Scope | Source and ownership | Access |
+| --- | --- | --- |
+| Shared | Trusted built-ins and user/admin JSON definitions | Explicitly granted to systems; never implicitly available to every agent |
+| System-local | Agent/user proposals persisted in SQLite with an owning `system_id` | Visible through that system's authorized catalog; unavailable elsewhere by default |
+
+Each entry has a stable ID, immutable versioned content, description, provenance,
+owner scope, requirements, and lifecycle state. `kind: "executable"` exposes a
+callable operation; its manifest includes execution form, input/output schemas,
+effect class, timeout, capabilities, and executable/artifact digest where applicable.
+Execution forms are trusted built-ins, sandboxed subprocesses, or approved brokered
+integrations, not arbitrary code loaded into the daemon.
+
+`kind: "skill"` supplies pinned instruction/context content, not a model-callable
+function or an executable hook. Declare dependencies with `requires_tools`; the
+daemon resolves and pins them and checks that they are already granted. Missing
+dependencies make the skill unavailable with an explicit error, not an automatic
+installation or grant. Skill content never overrides runtime permissions.
+
+At activation, resolve the intersection of the system, agent, and task grants.
+Expose only those executable function schemas and selected skill contents.
+Every invocation rechecks the exact version, current grant, lifecycle eligibility,
+arguments, and resource requirements. Resolve model-visible function names through
+that activation's pinned mapping, not a global bare-name lookup. Local entries
+cannot shadow shared/built-in IDs or resolve to another system's private entries.
+Catalog queries and source/artifact access obey the same scope checks.
+
+System-local proposals follow:
+
+```text
+draft -> evaluating -> pending_approval -> active -> disabled
+            |                |
+            v                v
+          failed           rejected
+```
+
+Executable evaluation builds/tests in confinement; skills undergo content and
+dependency validation plus relevant evaluation. Executable promotion defaults to
+human approval. Registration, passing tests, or becoming active does not assign
+the tool to an agent: grant it to the system and then an agent/task explicitly,
+within existing authority. Agents cannot approve their own expansion.
+Definition changes create new versions; lifecycle transitions are audited without
+mutating versioned content.
+
+Revocation/disable blocks subsequent calls even for pinned tasks. Selecting another
+approved version or rolling back creates an explicit assignment/revision change;
+it does not silently rewrite running/waiting tasks or reactivate revoked versions.
+Evaluation and promotion consume the originating system/goal's normal budgets.
+
+Publishing a local tool as shared is a separate user-controlled action, never an
+agent side effect. Under the JSON-owned v1 default, export a reviewed manifest and
+shareable artifact, then explicitly import it into administrative configuration.
+Copy approved content into shared artifact scope; do not expose private system
+files, memory, or credentials. Shared publication grants no system access by itself.
 
 ## 3. Worker lifecycle and brokers
 
@@ -306,7 +387,7 @@ Start with structured queries and SQLite text search, not a vector service.
 | --- | --- | --- |
 | Task | Conversation, tool receipts, checkpoints | Task participants with grants |
 | Agent | Reusable notes and observations | Owning agent |
-| System | Reviewed facts, procedures, skills | Granted agents in that system |
+| System | Reviewed facts, procedures, versioned skill references | Granted agents in that system |
 
 Entries carry provenance, author, evidence, version, classification, and retention.
 Retrieve relevant entries within context limits; treat retrieved content as
@@ -323,7 +404,8 @@ produce candidate revisions evaluated against the current baseline. Agents canno
 rewrite protected acceptance checks. Executable promotion defaults to human approval;
 only the approved revision is selected for future work, with rollback available.
 
-Generated extensions are Go subprocess tools, never daemon plugins. Quarantine
+Generated extensions are system-local registry entries of kind `executable`,
+implemented as Go subprocess tools, never daemon plugins. Quarantine
 source; build/test through the sandbox launcher with a pinned toolchain, isolated
 cache, no secrets/network, and `CGO_ENABLED=0`. Initially allow standard library
 only: no automatic dependency/toolchain downloads or `go generate`. Promotion
@@ -333,7 +415,8 @@ Failures remain quarantined and cannot trigger permission expansion.
 ## 7. Control API, UI, and recovery
 
 Expose an authenticated versioned API for systems, goals, agents, tasks, grants,
-limits/usage, messages, memory, schedules, artifacts, revisions, and approvals.
+limits/usage, the scoped tool registry, messages, memory, schedules, artifacts,
+revisions, and approvals.
 Provide scoped snapshot queries and a resumable event stream with event IDs.
 Commands include create/start/stop system, submit goal, send input, approve/reject,
 revise, revoke, pause/resume, and cancel. Retried UI commands use idempotency keys
@@ -350,9 +433,22 @@ when connected it must support active control, not just visualization:
 | Pause / resume | Stop admitting new activations without losing state; resume eligible work after current grant/budget checks |
 | Stop | Cancel that system's pending work/wakeups, revoke execution grants, and terminate its workers without stopping other systems |
 | Steer | Approve/reject requests and learning proposals, revise future agent configurations, and adjust authorized grants/budgets |
+| Manage tools | Browse shared tools, grant/revoke system access, inspect local proposals, approve/reject, assign agent versions, and roll back |
 
-The UI is not an administrative profile/provider editor in v1; configuration
-ownership and available choices follow section 2. Start/steer commands cannot use
+Provide a global **Tool catalog** for shared definitions and a **Tools** page inside
+each system. The system page separates granted shared entries from local entries,
+including drafts, evaluation failures, pending approvals, active and disabled
+versions. Show kind, origin/creator, source or skill content, schemas/dependencies,
+requested permissions, evaluation results, assignments, and usage.
+
+Local entries remain in their system context rather than appearing as globally
+available tools. Grant/revoke, approve/reject, assign-version, disable-local-version,
+and rollback controls invoke authorized, audited API operations. Disabling an entry
+and stopping an already-running tool are distinct actions.
+
+The UI is not an editor of administrative provider/profile/shared-tool definitions
+in v1; selection, grants, and local-tool lifecycle follow section 2. Shared publication
+uses the explicit export/import path in section 2.6. Start/steer commands cannot use
 prompt text or uploaded files to grant additional permissions.
 
 Additional information is a durable, attributed `user.input` event, not a silent
@@ -389,6 +485,9 @@ Local audit is not tamper-proof against the host administrator.
   daemon restart neither duplicates instances nor overwrites UI revisions/budgets.
   Profile changes take effect only in newly confined processes.
 - Two systems run concurrently without unauthorized memory/message/artifact access.
+- Shared tools require system and agent/task grants; local tools remain visible
+  only within their authorized system context. Skills load as content, cannot
+  grant dependencies, and cannot bypass executable-tool checks.
 - From the UI, create/start a system, send additional context, pause/resume it, and
   stop it without affecting another system. Input survives pause/restart; retried
   commands do not duplicate work, and starting again does not replay canceled tasks.
@@ -400,6 +499,8 @@ Local audit is not tamper-proof against the host administrator.
   repeat non-idempotent effects.
 - A generated tool is quarantined, evaluated, explicitly promoted, and pinned;
   changing its content invalidates approval, and rollback restores the old revision.
+  Its local proposal and lifecycle are visible in the owning system's Tools page;
+  publishing it as shared requires a separate authorized action.
 - The daemon remains operational without the UI. No containers, external queue,
   generic policy engine, or online model training are required.
 
@@ -415,7 +516,7 @@ evidence, including its relevant failure path.
 | Level | Boundary | Required coverage |
 | --- | --- | --- |
 | Unit | Small deterministic logic; no processes or external services | Configuration validation, grant narrowing, task transitions, quota calculations, schedule/time-zone rules, revision/approval matching |
-| Component | One subsystem with its real storage/handlers and controlled dependencies | SQLite transactions, memory isolation, broker admission, mailbox/timer behavior, API validation, UI forms and command mapping |
+| Component | One subsystem with its real storage/handlers and controlled dependencies | SQLite transactions, scoped tool resolution, memory isolation, broker admission, mailbox/timer behavior, API validation, UI forms and command mapping |
 | Integration | Built daemon, workers, and optional UI communicating through real APIs/IPC, SQLite, and nono-go | Cross-system isolation, lifecycle controls, delegation, sandbox enforcement, crash recovery, shared LLM limits, extension promotion |
 
 Component tests use temporary SQLite databases rather than mocking SQL, and
@@ -429,6 +530,10 @@ boundaries whose behavior they claim to verify.
 - **Configuration and grants:** reject unknown fields, invalid references, escaping
   paths, missing credentials, and unauthorized revisions. Error responses and
   inspection endpoints must not expose secrets.
+- **Tool registry:** verify shared/local listing and artifact isolation, pinned
+  version resolution, non-shadowing IDs, system/agent/task grant intersections,
+  and revocation of pinned tools. Skill dependencies cannot install or grant tools;
+  a registered/evaluated candidate is not executable without promotion and assignment.
 - **Model broker:** assert aggregate request/token bounds across systems and model
   aliases, maximum in-flight calls, queue limits, fairness, and atomic reservations.
   Cover streaming cancellation, oversized requests, throttling/reset boundaries,
@@ -467,6 +572,11 @@ boundaries whose behavior they claim to verify.
    evaluate it, reject a failing candidate, approve an exact passing artifact,
    invoke it through its registered tool, and roll back. Modified binaries,
    stale/replayed approvals, and agent attempts to alter protected checks fail.
+6. **Scoped catalog and UI:** grant a shared tool/skill to one of two systems and
+   verify the other's agent cannot use it. Create a local proposal and follow its
+   status/source/results through the owning system's Tools page; another system
+   cannot list or fetch it. Publication requires explicit administrative import,
+   preserves private artifacts, and does not automatically grant the new shared tool.
 
 Use only temporary fixture files and controlled endpoints for denial checks;
 never probe real credentials or unrelated user data. Run irreversible sandbox

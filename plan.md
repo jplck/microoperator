@@ -49,7 +49,7 @@ another's data. Creating a system does not launch another daemon.
             |
   +--------------------- Go daemon --------------------------+
   | User goals / approvals / stop controls                    |
-  | Agent registry + immutable revisions                     |
+  | Agent/tool records + immutable revisions                  |
   | Supervisor + durable task/mailbox scheduler              |
   | Capability checks + approvals + shared LLM limits         |
   | Governed message router / A2A adapter                     |
@@ -112,7 +112,7 @@ commands.
 ## 4. Configurable agents, tools, and skills
 
 Bootstrap from user-owned, versioned JSON configuration: the initial operator,
-approved model providers, shared LLM limits, tool registry, sandbox profiles, and
+approved model providers, shared LLM limits, shared tool definitions, sandbox profiles, and
 capability grants.
 Use Go's JSON support rather than adding a configuration language. Secrets stay
 outside agent definitions and are resolved only by the trusted broker.
@@ -126,7 +126,7 @@ An agent revision contains:
 | Identity and lineage | Stable ID; revision; creator; parent; owning user goal |
 | Prompt and skills | Instructions plus pinned, read-only skill content |
 | Model selection | Approved provider/model and token limits; no raw API keys |
-| Tools | Allowed tool IDs, argument constraints, and credential references |
+| Tools | Pinned scoped catalog references and argument constraints |
 | Memory | Read/write scopes, retention, and allowed shared collections |
 | Wakeups | Approved subscriptions, schedules, and permitted event types |
 | Capabilities | Agent creation, delegation, code proposals, and other privileges |
@@ -164,6 +164,40 @@ A skill is instruction content plus declared requirements, not a permission gran
 Loading a skill cannot install tools, execute hooks, obtain secrets, or expand
 capabilities. Agent-authored skills follow the same revision/promotion path as
 agent-authored prompts.
+
+### One registry, scoped ownership
+
+Use "tools" as the catalog umbrella for executables and skills, with an explicit
+kind distinguishing callable operations from instruction/context content.
+Maintain one daemon registry API over two sources:
+
+| Scope | Source | Availability |
+| --- | --- | --- |
+| Shared | Trusted built-ins and administrative JSON definitions | Explicit grants to systems, narrowed for each agent/task |
+| System-local | Agent/user proposals and revisions in SQLite | Only within the owning system's authorized context |
+
+Entries carry IDs, immutable versions, provenance, descriptions, content/artifact
+digests, capability requirements, dependencies, and lifecycle state. Executable
+manifests include schemas and execution details. Skills declare required tools;
+loading them never automatically installs or grants those dependencies.
+
+System grants select eligible tools; agent/task grants narrow that set. Resolve
+and pin exact scoped versions when creating revisions, expose their function
+schemas or skill content at activation, and recheck every call in the broker.
+Local entries cannot shadow trusted IDs, and agents cannot query other systems'
+private catalogs or source artifacts.
+
+Agent-created entries progress from local draft through evaluation and approval
+to active versions, with failed/rejected/disabled states visible. Becoming active
+does not itself grant execution: explicit system and agent assignment is required.
+Generated executable tools use the sandboxed build/promotion path below; no runtime
+plugin is loaded into the daemon. Revocation blocks future calls to pinned versions.
+
+Publishing a local tool as shared requires a separate user-controlled action and
+review of the content being shared. With the current JSON-owned defaults, export
+a reviewed manifest/artifact and explicitly import it into administrative config.
+Do not expose private system data or automatically grant the shared tool to any
+system. See `spec.md` section 2.6 for the registry and assignment contract.
 
 ## 5. How agents speak: addressed tasks and durable events
 
@@ -521,7 +555,7 @@ Keep three logical kinds of memory:
 | --- | --- | --- |
 | Task state | Conversation, pending work, tool receipts, checkpoints | Owning task/agent |
 | Agent memory | Notes and reusable observations | Owning agent, versioned |
-| Shared knowledge | Reviewed facts, procedures, reusable skills | Scoped, approval-controlled promotion |
+| Shared knowledge | Reviewed facts, procedures, versioned skill references | Scoped, approval-controlled promotion |
 
 Entries include provenance, author, goal/task references, timestamps, classification,
 confidence/evidence, version, and expiry. Treat retrieved text as untrusted data,
@@ -633,6 +667,16 @@ The UI is a control surface, not just a monitor. Required interactions:
 | Pause / resume | Stop new activations while retaining state; resume eligible work under current grants and budgets |
 | Stop a system | Cancel pending tasks/wakeups, revoke execution grants, and stop workers in that system only |
 | Steer work | Approve/reject requests and learning proposals, edit future agent revisions, and adjust authorized grants/budgets |
+| Manage tools | Browse shared catalog entries, grant/revoke system access, inspect local drafts/results, approve/reject, assign versions, and roll back |
+
+Provide a global **Tool catalog** for shared definitions and a system-specific
+**Tools** page. Separate granted shared tools from locally created tools, including
+drafts, failed evaluations, pending approvals, active and disabled versions.
+Show kind, creator/provenance, source or skill content, schemas/dependencies,
+requested permissions, evaluation evidence, assignments, and usage. Local entries
+remain in their system context, not globally available merely because the registry
+is central. The UI manages grants and local lifecycle; shared definitions retain
+their administrative JSON authority, with explicit export/import for publication.
 
 Persist follow-up information as an attributed `user.input` event. Deliver it at
 the next safe agent turn rather than rewriting hidden conversation state or
@@ -667,11 +711,11 @@ These are implementation gates, not a request to build now.
 | Phase | Smallest useful result | Required evidence before advancing |
 | --- | --- | --- |
 | 0. Boundary spike | nono-go sandbox-exec launcher; scoped broker IPC; explicit permission checks | Pinned native-library provenance, filesystem/network denial, exec/thread/descendant inheritance, required resource caps, capability identity, cancellation, and fail-closed launch verified on the chosen host |
-| 1. Single agent + LLM limits | Daemon, SQLite, CLI goal submission, one prompt agent, rate-limited model broker, one tool | Shared RPM/TPM and concurrency caps, queue bounds, streaming/cancellation, throttling cooldowns, retry accounting, and restart-safe budgets exercised against a controllable fake provider; credentials stay out of workers |
-| 2. Small team | Governed agent creation, addressed tasks, durable mailboxes, delegation | Child cannot escalate; two agents exchange artifacts; duplicate delivery and waiting parents behave correctly |
+| 1. Single agent + LLM limits | Daemon, SQLite, CLI goal submission, one prompt agent, shared tool registry, rate-limited model broker, one tool | Shared RPM/TPM and concurrency caps, queue bounds, streaming/cancellation, throttling cooldowns, retry accounting, and restart-safe budgets exercised against a controllable fake provider; credentials stay out of workers |
+| 2. Small team | Governed agent creation, system/agent tool grants, addressed tasks, durable mailboxes, delegation | Child cannot escalate; two agents exchange artifacts; duplicate delivery and waiting parents behave correctly |
 | 3. Wakeups | Timers, cron, subscriptions, pause/cancel, event limits | Restart, missed cron runs, revocation, event storms, and queue limits are exercised |
-| 4. Memory + UI | Scoped retrieval and detached UI for create/start, input, inspect, approve, pause/resume, and stop | Two systems can be controlled independently; follow-up input survives pause/restart; repeated commands do not duplicate work; grants and approval replay checks hold; daemon remains usable without UI |
-| 5. Generated extensions | Quarantined Go build/test/promote/rollback loop | Escape attempts fail; failed candidates stay quarantined; only the exact approved binary runs |
+| 4. Memory + UI | Scoped retrieval and detached UI for system controls, shared tool access, and approvals | Two systems can be controlled independently; follow-up input survives pause/restart; repeated commands do not duplicate work; tool grants and approval replay checks hold; daemon remains usable without UI |
+| 5. Generated extensions | System-local tool proposals, Go build/test/promote/assign/rollback, and local Tools view | Shared/local grants and visibility hold; failed candidates stay quarantined; only assigned approved versions run; publication is explicit |
 | 6. Interoperability | A2A adapter; external model gateway only if needed | Protocol mapping preserves semantics; no adapter bypasses permissions; a configured gateway preserves accounting and retry behavior |
 
 Use Go's standard test runner when implementation begins. Each phase needs a small
