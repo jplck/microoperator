@@ -402,3 +402,98 @@ Local audit is not tamper-proof against the host administrator.
   changing its content invalidates approval, and rollback restores the old revision.
 - The daemon remains operational without the UI. No containers, external queue,
   generic policy engine, or online model training are required.
+
+## 9. Testing requirements
+
+Use Go's `testing` package and standard-library helpers. Add focused tests at the
+lowest useful level; do not duplicate every case across all levels or introduce
+a test framework. Each implemented acceptance criterion above must have executable
+evidence, including its relevant failure path.
+
+### 9.1. Test levels
+
+| Level | Boundary | Required coverage |
+| --- | --- | --- |
+| Unit | Small deterministic logic; no processes or external services | Configuration validation, grant narrowing, task transitions, quota calculations, schedule/time-zone rules, revision/approval matching |
+| Component | One subsystem with its real storage/handlers and controlled dependencies | SQLite transactions, memory isolation, broker admission, mailbox/timer behavior, API validation, UI forms and command mapping |
+| Integration | Built daemon, workers, and optional UI communicating through real APIs/IPC, SQLite, and nono-go | Cross-system isolation, lifecycle controls, delegation, sandbox enforcement, crash recovery, shared LLM limits, extension promotion |
+
+Component tests use temporary SQLite databases rather than mocking SQL, and
+`httptest.Server` for provider responses. Use controlled time for quota windows,
+backoff, expiry, and cron; avoid tests that depend on long sleeps or wall-clock
+timing. Integration tests fake only external providers/services, not the runtime
+boundaries whose behavior they claim to verify.
+
+### 9.2. Component checks
+
+- **Configuration and grants:** reject unknown fields, invalid references, escaping
+  paths, missing credentials, and unauthorized revisions. Error responses and
+  inspection endpoints must not expose secrets.
+- **Model broker:** assert aggregate request/token bounds across systems and model
+  aliases, maximum in-flight calls, queue limits, fairness, and atomic reservations.
+  Cover streaming cancellation, oversized requests, throttling/reset boundaries,
+  retries, unknown usage, revoked grants, and exhausted budgets. Verify actual
+  dispatch counts against the configured window/refill semantics, not just delays.
+- **Storage and memory:** verify transactional rollback, scoped reads/writes/search,
+  protected artifact references, and revision/retention behavior. Denied searches
+  must not disclose snippets or counts.
+- **Router and scheduler:** verify duplicate delivery, bounded retry/dead-letter
+  handling, asynchronous parent/child progress, revoked subscriptions, cron/DST,
+  missed-run coalescing, and event-loop limits.
+- **API and UI:** exercise authentication, CSRF, escaped output, bounded uploads,
+  command idempotency, and visible errors using real handlers and rendered forms.
+
+### 9.3. Integration scenarios
+
+1. **UI-controlled systems:** create two systems from one launch configuration.
+   Start/delegate work, send follow-up context, pause/resume, approve/reject, and
+   stop through the actual UI/API path. Assert independent state and budgets,
+   retained memory/history, durable input, and continued operation of the other
+   system. Closing the UI must not stop the daemon.
+2. **Sandbox boundary:** use the real launcher and nono-go to demonstrate allowed
+   workspace access and denied writes to inputs, out-of-scope reads, and direct
+   networking. Check exec/thread/descendant inheritance, inherited descriptors,
+   credential isolation, failed launch, resource caps, and process-tree cleanup.
+   A brokered request may succeed while direct worker access remains denied.
+3. **Recovery and duplicates:** interrupt the daemon/worker at transaction and
+   dispatch boundaries; restart against the same database. Verify leases, events,
+   schedules, inputs, usage, and cooldowns survive without replenishing budgets.
+   Unknown non-idempotent effects must require reconciliation rather than replay.
+4. **Concurrent model traffic:** run multiple real workers against a controllable
+   fake provider, including streams, 429 responses, disconnects, and timeouts.
+   Verify shared limits and cancellation end to end. A failed configured gateway
+   must not cause a direct-provider bypass.
+5. **Learning and tool promotion:** build a small Go candidate in confinement,
+   evaluate it, reject a failing candidate, approve an exact passing artifact,
+   invoke it through its registered tool, and roll back. Modified binaries,
+   stale/replayed approvals, and agent attempts to alter protected checks fail.
+
+Use only temporary fixture files and controlled endpoints for denial checks;
+never probe real credentials or unrelated user data. Run irreversible sandbox
+operations and generated programs only in disposable child processes, not inside
+the test runner. Bound all subprocess lifetimes and reap their descendants.
+
+### 9.4. Execution and platform gates
+
+Once implementation and a Go module exist, the intended suite commands are:
+
+```sh
+CGO_ENABLED=1 go test ./...
+CGO_ENABLED=1 go test -race ./...
+CGO_ENABLED=1 go test -tags=integration -count=1 ./...
+```
+
+Keep unit/component tests in the default suite. Gate real-process/sandbox integration
+tests with the `integration` build tag; run relevant packages during development
+and complete suites at integration/release gates. Tests use fake provider responses,
+never paid model calls, real credentials, containers, or external infrastructure.
+
+Run race checks where supported and integration checks on every OS/architecture
+claimed as supported, using pinned native libraries. An explicitly requested
+integration run must fail preflight when required confinement cannot be exercised;
+silently skipping it is not evidence of platform support. Report the tested host,
+native-core version, and unavailable controls.
+
+Changes to native libraries, launch profiles, persistence, or broker boundaries
+require the corresponding integration scenarios to run again. Documentation-only
+changes need no Go build; validate embedded examples and references as applicable.

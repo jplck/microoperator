@@ -68,11 +68,24 @@
   do not substitute silent defaults or success-shaped fallbacks.
 - Format changed Go files with `gofmt`. Use Go's `testing` package and the smallest
   runnable regression check covering nontrivial changes; avoid a new test framework.
-- Once a Go module exists, run targeted `go test` and `go vet` for affected packages.
-  Use `go test -race` for concurrency changes on a supported cgo-enabled platform.
+- Follow [the spec's testing requirements](../spec.md#9-testing-requirements):
+  unit tests for deterministic logic, component tests for a subsystem with real
+  temporary storage/handlers, and integration tests across actual runtime boundaries.
+  Include relevant denial, cancellation, duplicate-delivery, and recovery paths.
+- Use temporary SQLite databases, fake model endpoints (`httptest.Server`), and
+  controlled clocks. Do not mock away the boundary being tested or rely on sleeps
+  as evidence that rate limits hold. Assert dispatch counts, state, and side effects.
+- Once a Go module exists, run targeted `go test` and `go vet` for affected packages
+  with the required cgo toolchain; use `go test -race` for concurrency changes.
+  Default tests cover units/components. Real-process/sandbox tests use the
+  `integration` build tag: `CGO_ENABLED=1 go test -tags=integration -count=1 ./...`.
   Follow existing project commands when present; never invent passing results.
-- Use fake model endpoints, temporary databases, and controlled clocks where needed.
-  Tests must not spend real API credits or run generated code outside its sandbox.
-  Run irreversible sandbox checks in disposable subprocesses, never the test runner.
+- Changes to launch/native code, persistence, or broker boundaries require relevant
+  integration coverage with real daemon/worker processes and fake external providers.
+  Use fixture paths, not personal files, for denial checks. Tests must not spend
+  real API credits or run generated code outside its sandbox. Run irreversible
+  sandbox checks in disposable subprocesses, never the test runner; reap children.
+- Required sandbox support missing from an explicitly requested integration run
+  is a failure, not a silent skip. Run platform gates before claiming support.
 - Documentation-only changes need no Go build or new tooling. Report unsupported
   platform checks and unverified assumptions honestly rather than claiming isolation.
