@@ -1,16 +1,21 @@
 # Microoperator: technical specification
 
-Target design contract. A diagnostic macOS worker-launch spike is implemented;
-see [README.md](README.md) for commands, verified scope, and unresolved native
-confinement limitations. It is not yet approved for untrusted agent code.
-See [plan.md](plan.md) for rationale and dependency research.
+Target design contract and architecture rationale. A diagnostic worker-launch
+spike is implemented; see [README.md](README.md) for commands, verified scope, and
+unresolved native confinement limitations. It is not yet approved for untrusted agent code.
+See [implementation-plan.md](implementation-plan.md) for milestone status,
+dependencies, and acceptance checks. Diagnostic success is not qualification.
 "Must" denotes an implementation requirement, not a claim of completed functionality.
+Rationale explains design choices; section 2.4 explicitly labels unresolved choices.
+The appendix records dependency research, not verified platform support.
 
 ## 1. Runtime and isolation
 
 One Go daemon hosts multiple independent agent systems on one machine. Each system
 has its own operator agent, team, goals, memory, and budgets. The daemon owns
 execution; operators propose and coordinate work without administrative authority.
+The operator is the default coordinator, not a mandatory relay for peer messages.
+Agents are versioned definitions and durable state, not separate codebases or services.
 
 ```text
 CLI / optional Go UI -> daemon API
@@ -31,6 +36,15 @@ Project code is Go. Sandboxing uses `github.com/nolabs-ai/nono-go`, requiring cg
 a C toolchain, and pinned native nono libraries. No containers or nono CLI are
 required. Systems share a daemon failure boundary; this is not hostile
 multi-tenant isolation.
+
+**Rationale:** agents propose; the runtime authorizes and performs. A single-user,
+single-machine daemon owns the shared resources and trust boundary without a
+distributed control plane. Its logical components are not separate services.
+
+Prompts, retrieved content, tool output, and generated programs are untrusted.
+Sandboxing limits worker access to host resources; it does not protect against a
+compromised host administrator or kernel, or control remote services after
+authorized data disclosure.
 
 ## 2. Configuration and entities
 
@@ -220,9 +234,9 @@ directory and cannot bypass protected-path or artifact authorization checks.
 | --- | --- |
 | System | ID, operator, lifecycle state, grants, aggregate limits |
 | Goal | System, user prompt, owner, outcome, aggregate budget |
-| Agent revision | Identity/lineage, prompt, model, pinned skills/tools, memory scopes, wakeups, grants, limits |
+| Agent revision | Identity/revision, creator/parent/owning goal, prompt, model, pinned skills/tools, memory scopes, wakeups, grants, limits |
 | Task | System/goal/agent, pinned revision, status, continuation, pending/completed call IDs |
-| Event | ID/type/version, system, authenticated source, destination, goal/task, correlation/causation, timestamp/expiry, bounded payload or artifact reference |
+| Event | ID/type/version, system, authenticated source, destination, goal/task, correlation/causation, timestamp/expiry, classification, authorization reference, trace metadata, bounded payload or artifact reference |
 | Tool revision | ID/version, shared or system scope, owner/provenance, kind, manifest/content digest, required capabilities/dependencies, lifecycle state |
 
 Revisions are immutable. New tasks select the active revision; running/waiting tasks
@@ -230,6 +244,12 @@ remain pinned unless explicitly migrated. Revocations still apply to pinned work
 Skills are read-only instructions, never permission grants. Agent creation is a
 validated runtime request; child capabilities cannot exceed the creator's
 delegable grant. Descendants share goal and system budgets.
+Agent limits cover lifetime, turns, concurrency, descendants, event volume,
+and token/spend budgets.
+
+Expose a scoped directory of agent capabilities and availability so agents can
+reuse collaborators before proposing new ones. These runtime-owned advertisements,
+agent names, and prompts are not authorization grants.
 
 ### 2.6. Central tool registry
 
@@ -244,9 +264,11 @@ registry API with scoped entries, not separate registries per worker:
 Each entry has a stable ID, immutable versioned content, description, provenance,
 owner scope, requirements, and lifecycle state. `kind: "executable"` exposes a
 callable operation; its manifest includes execution form, input/output schemas,
-effect class, timeout, capabilities, and executable/artifact digest where applicable.
-Execution forms are trusted built-ins, sandboxed subprocesses, or approved brokered
-integrations, not arbitrary code loaded into the daemon.
+effect class, timeout, resource limits, capabilities, and executable/artifact digest
+where applicable. Execution forms are trusted built-ins, sandboxed subprocesses,
+or approved brokered integrations, not arbitrary code loaded into the daemon.
+Subprocess definitions pin the executable and fixed argument template; a shell
+string is not a tool schema.
 
 `kind: "skill"` supplies pinned instruction/context content, not a model-callable
 function or an executable hook. Declare dependencies with `requires_tools`; the
@@ -295,12 +317,21 @@ files, memory, or credentials. Shared publication grants no system access by its
 Use one executable with `daemon`, `sandbox-exec`, and `worker` modes. The daemon
 launches a fresh sandbox-exec child with a trusted profile and pinned executable.
 The child applies nono-go on a locked OS thread and immediately execs the target
-on that thread. Never call irreversible `nono.Apply` in the daemon.
+on that thread, without unlocking or running agent logic in between. Never call
+irreversible `nono.Apply` in the daemon. Reuse this launch path for operators,
+other agents, tools, builders, and generated binaries.
 
 Workers receive only scoped read-only inputs, private scratch/output, sanitized
 environment, and bounded framed JSON over stdin/stdout. No provider credentials,
 database access, or unrestricted network. Release task content only after
-confinement; any setup/apply/exec failure aborts launch.
+confinement; any setup/apply/exec failure aborts launch. Bind IPC identity to the
+daemon-established process/session; caller-supplied IDs cannot select a different
+identity. Keep diagnostics on size-limited, secret-redacted stderr.
+
+**Rationale:** a worker is a temporary activation, not the agent's durable identity.
+The isolated launcher avoids treating one restricted Go thread as confinement for
+an already-running multithreaded process. The daemon owns supervision and brokering;
+no nono supervisor is needed.
 
 The binding/native-core combination must demonstrably enforce the requested
 profile, including exec/thread/descendant inheritance and non-TCP network denial.
@@ -313,6 +344,9 @@ Workers request model calls, tools, delegation, memory, messages, subscriptions,
 timers, and agent proposals through the daemon's brokers. Each request has a
 correlation ID, operation, and validated arguments; failures return explicit errors.
 No broker operation exposes arbitrary host shell execution or unrestricted URLs.
+Brokered network requests enforce destination allowlists, redirect handling,
+request limits, and credential scope. Artifacts leave a worker only through
+validated, scoped ingestion that rejects symlink/path-traversal escapes.
 
 Task states are `queued`, `running`, `waiting`, and terminal `completed`, `failed`,
 `canceled`, or `rejected`. Waiting records a reason, wakeup condition, and deadline;
@@ -320,11 +354,63 @@ an authorized wakeup returns the task to the queue for admission.
 Delegation is asynchronous: persist continuation and release the worker slot.
 Worker exit alone is not task completion; terminal tasks cannot be silently reopened.
 
+### 3.1. Sandbox qualification
+
+Build the runtime with `CGO_ENABLED=1` and a C toolchain. Pin the binding and verify
+native-library provenance for each target. Normal builds use bundled libraries;
+if a native-core rebuild becomes necessary, use a native Rust toolchain on the
+target host, not the upstream helper's Docker-based Linux build path. Dependency
+upgrade work remains deferred as described in the README.
+
+Use `IsSupported` and `SupportInfo` for initial diagnostics, then verify the exact
+requested controls. Neither a support flag nor a `QueryContext` permission preview
+proves that a running workload is confined.
+
+- Linux Landlock filesystem support starts at kernel 5.13; network and process
+  scoping require newer ABIs and matching binding/native-core support. A kernel
+  version alone is not a qualification check.
+- macOS uses `sandbox_init()`, documented by nono as a private Apple API. Treat OS
+  updates as compatibility events and rerun boundary checks.
+- Set `NetworkBlocked` explicitly and check non-TCP paths and inherited descriptors.
+  Upstream CLI seccomp/network protections are not binding guarantees; the
+  [researched binding/core](#appendix-a-research-baseline-and-primary-sources) predates
+  the compared CLI documentation.
+
+The Linux pipe-only worker profile supplements nono-go with a fixed seccomp filter:
+deny socket/socket-pair creation, `io_uring`, and acquisition of another process's
+descriptors through `pidfd_getfd`. Validate the syscall architecture and reject
+alternate ABIs rather than leaving compatibility-syscall bypasses. Reject sockets
+on standard descriptors and close unrelated descriptors across exec. Install the
+filter on the launcher's locked thread before `nono.Apply`, then immediately exec
+the worker. Filter setup failure aborts launch; daemon networking stays unrestricted
+by this worker filter. Additional architectures require their own verified profile.
+
+Hard aggregate CPU, memory, process-count, and disk limits need explicit, tested
+host enforcement, such as delegated Linux cgroups where available plus storage
+limits. Deadlines, output caps, Go contexts, or best-effort monitoring do not
+establish these guarantees. Disable profiles whose required limits or confinement
+cannot be enforced, and report them in daemon health and the UI. A binding/core
+upgrade is a prerequisite where needed, never grounds for bypassing a check.
+Qualify a supported host profile before enabling autonomous generated code.
+
 ## 4. Messaging and wakeups
 
 Agents address peers directly through the daemon's authorized router, not through
 the operator and not through unmanaged peer sockets. Check permissions on
 acceptance and again before delayed delivery/execution.
+
+| Primitive | Meaning |
+| --- | --- |
+| Delegate | Ask a named agent to perform work; return a task ID immediately |
+| Reply / progress | Correlate a message, artifact, or status with an existing task |
+| Publish | Emit a typed event to an explicitly authorized audience/subscription |
+| Schedule | Register a future or recurring event within the caller's grant |
+| Subscribe | Request a filtered wakeup subscription within authorized scopes |
+
+Default to addressed delivery and explicit subscriptions, not ambient global
+broadcast. Recipients may reject tasks or request input; accepting work and
+spawning agents remain separate governed actions. The daemon stamps trusted event
+fields; agent-provided labels cannot impersonate a sender or declassify data.
 
 > **Reminder for later:** Review the router/broker/eventing trust boundary before
 > enabling privileged delegation. Prevent confused-deputy bypasses: bind sender
@@ -334,19 +420,33 @@ acceptance and again before delayed delivery/execution.
 
 Commit events and intended mailbox deliveries atomically in SQLite. Local delivery
 is at least once: deduplicate by event/recipient and correlate resulting actions.
-Bound payloads, queues, retries, and fan-out; expose expired/dead-letter deliveries.
+Task completion and resulting outbound events commit together. Acceptance means
+durable recording, not completion. Each mailbox has a defined enqueue order, not
+global completion ordering. Bound payloads, queues, retries, backoff, attempts, and
+fan-out; expose expired/dead-letter deliveries rather than silently dropping work.
 External effects require idempotency or reconciliation. Never blindly retry an
-action whose outcome is unknown.
+action whose outcome is unknown; exactly-once external effects are not promised.
+Persist continuations, pending call IDs, and completed tool results so recovery
+does not replay effects.
+
+**Rationale:** asynchronous delegation lets waiting parents release worker slots
+instead of exhausting them or deadlocking their children.
 
 The same path handles addressed messages, task results, subscribed events, and
-agent-created one-shot/cron timers. Persist schedules and subscriptions; validate
-their owner, target, expiry, grants, and trigger budget at creation and firing.
-Use five-field cron with explicit time zone, default UTC; specify/test DST behavior.
-After downtime, coalesce missed occurrences into one catch-up event and deduplicate
-by schedule/occurrence. Standing work beyond a goal's lifetime needs explicit grants.
+agent-created one-shot/cron timers, including tool-completion and memory-change
+notifications. A daemon timer loop claims due events and the scheduler claims ready
+mailbox work; do not create one goroutine or OS cron entry per agent. Persist
+schedules and subscriptions; validate their owner, target, event template, expiry,
+grants, and trigger budget at creation and firing. Use a maintained Go parser for
+five-field cron with an explicit IANA time zone, default UTC; document and test
+its DST semantics. Persist schedules in wall time; use monotonic in-process waits
+where available. After downtime, coalesce missed occurrences into one catch-up
+event and deduplicate by schedule/occurrence. Only the user or an explicitly
+privileged operator may authorize standing work beyond a goal's lifetime.
 
-Enforce system/goal event budgets, causation depth, and activation limits to prevent
-feedback loops. New agents and event IDs must not reset allowances.
+Enforce system/goal event budgets, per-agent rate limits, causation depth, and
+activation limits to prevent feedback loops. Track origins and coalesce memory
+events. New agents, subscriptions, and event IDs must not reset allowances.
 
 Agent-to-agent communication uses only the durable event router, local mailboxes,
 and sandboxed worker IPC in v1. Do not add per-agent network servers or external
@@ -359,32 +459,62 @@ All model calls, including evaluation and learning, pass through the shared brok
 Quota groups reflect actual provider/account/model sharing, not individual agents.
 Enforce request/token rates, burst, concurrency, queue bounds, and wait deadlines.
 Schedule fairly across systems, then goals; additional agents do not buy priority.
+Use one limiter state per quota group and admit only when every applicable group
+passes. New API keys or model aliases must not create fresh allowances. Waiting
+for capacity does not occupy an in-flight provider slot.
 
 Reserve goal/system budgets atomically before dispatch. Estimate input tokens,
 cap output, reconcile reported usage, and retain conservative reservations for
-unknown outcomes. Spend budgets are separate from rate limits; token/cost
-estimates must not be represented as exact provider accounting.
+unknown outcomes. Reserve estimated input plus bounded output against token-rate
+limits using provider-specific estimates and configurable headroom. Reject requests
+that cannot fit instead of queuing them forever. Count every dispatched attempt;
+do not automatically refund rate capacity for smaller output unless provider
+accounting permits it. Spend budgets are separate from rate limits; currency
+estimates require configured model pricing. Surface unsupported usage/pricing
+rather than presenting estimates as exact accounting or a hard cost guarantee.
 
 Streaming occupies a concurrency slot until closed. Honor supported throttling
 signals and `Retry-After`; otherwise use bounded backoff with jitter. Every retry
 re-enters admission within the original deadline/budget. The broker owns retries;
-avoid stacked SDK/gateway retries. Persist usage, reservations, and cooldowns so
-restart does not reset allowances.
+disable overlapping SDK/gateway retries where possible and account for unavoidable
+upstream retries. Disconnected streams and ambiguous timeouts may have incurred
+usage; do not silently replay calls or duplicate emitted tool calls. Cancellation
+before dispatch releases reservations; after dispatch it does not imply the provider
+stopped or billed nothing. Persist pending call IDs, dispatch/usage records,
+reservations, and cooldowns. On restart, reconcile outcomes and restore conservative
+rate state, not a full burst or replenished budget. Reject or expire unrecoverable
+work with a visible reason.
+
+Expose queue wait, in-flight calls, quota-group utilization, tokens/cost, throttles,
+retries, and budget exhaustion in the API/UI. Rate waiting, exhausted budget, and
+provider failure are distinct states.
 
 An existing external gateway can be a configured provider endpoint when multiple
 applications share quotas. Keep local fairness and budgets; never bypass a failed
-gateway automatically.
+gateway automatically. Preserve the configured model API semantics and document
+each layer's limit scope and retry ownership.
+
+**Rationale:** the runtime already owns calls and knows which goal pays, so local
+admission needs no extra service or gateway abstraction. Local limits cannot account
+for other applications' usage; a shared gateway is useful when that becomes a need.
 
 Use explicit Go permission and approval checks, not a general policy engine.
+Unknown identities, missing grants, invalid requests, and failed checks deny work.
 Approvals bind the exact action, artifact/agent/grant revisions, approver, expiry,
-and permitted use count. Recheck grants before resumption. Agents cannot approve
-their own escalation, edit audit state, or turn memory into authority.
+and permitted use count. Suspend pending approval in durable state; material changes
+invalidate it. Recheck grants before resumption, including queued model calls.
+Only the user/admin may increase grants or budgets. Agents cannot approve their own
+escalation, edit audit state, or turn memory into authority. Revocation cannot undo
+completed external effects or retract already-disclosed data.
 
 ## 6. Memory and self-learning
 
 The daemon owns SQLite and scoped immutable artifacts. Workers use memory APIs;
 authorization must precede search results, snippets, counts, and artifact access.
-Start with structured queries and SQLite text search, not a vector service.
+Keep large artifacts outside SQLite, referenced by digest and access scope. Use
+`database/sql` with a maintained pure-Go SQLite driver to avoid another native
+dependency. Start with structured keys/queries and SQLite text search, not a vector
+service or embedding pipeline; add embeddings only for a demonstrated retrieval gap.
 
 | Scope | Contents | Default access |
 | --- | --- | --- |
@@ -392,7 +522,11 @@ Start with structured queries and SQLite text search, not a vector service.
 | Agent | Reusable notes and observations | Owning agent |
 | System | Reviewed facts, procedures, versioned skill references | Granted agents in that system |
 
-Entries carry provenance, author, evidence, version, classification, and retention.
+Task-state writes belong to the owning task/agent; agent-memory writes are versioned.
+Shared knowledge uses scoped, approval-controlled promotion.
+
+Entries carry provenance, author, goal/task references, timestamps, confidence,
+evidence, version, classification, and expiry/retention.
 Retrieve relevant entries within context limits; treat retrieved content as
 untrusted data. Cross-system sharing requires explicit collection access or
 authorized export. Retention/deletion must cover artifacts, indexes, and backups.
@@ -400,20 +534,41 @@ authorized export. Retention/deletion must cover artifacts, indexes, and backups
 Learning is `outcome -> proposal -> evaluation -> promotion -> reuse`, not model
 weight updates. Task events or bounded schedules may wake an improvement agent.
 User feedback and protected checks supply evidence; self-reported success does not.
-All learning consumes ordinary system/goal budgets.
+Store failures as well as successes. All learning consumes ordinary system/goal
+budgets.
 
 Scoped notes may be admitted within existing grants. Prompt/skill/tool changes
-produce candidate revisions evaluated against the current baseline. Agents cannot
-rewrite protected acceptance checks. Executable promotion defaults to human approval;
-only the approved revision is selected for future work, with rollback available.
+produce candidate revisions compared with a fixed current baseline using bounded
+evaluation cases. Shared instructions and tool changes require explicit promotion.
+Agents may propose tests but cannot rewrite protected acceptance checks. Executable
+promotion defaults to human approval; only the approved revision is selected for
+future work, with rollback available.
+Rollback changes the active revision, not historical task records. Learning never
+mutates the daemon binary or silently edits permission/limit configuration.
 
 Generated extensions are system-local registry entries of kind `executable`,
-implemented as Go subprocess tools, never daemon plugins. Quarantine
-source; build/test through the sandbox launcher with a pinned toolchain, isolated
-cache, no secrets/network, and `CGO_ENABLED=0`. Initially allow standard library
-only: no automatic dependency/toolchain downloads or `go generate`. Promotion
-binds source, build settings, test evidence, binary digest, and capabilities.
-Failures remain quarantined and cannot trigger permission expansion.
+implemented as Go subprocess tools with narrow JSON input/output, never daemon
+plugins or privileged installation hooks. Promotion follows:
+
+1. Submit source and a manifest into a quarantined artifact namespace.
+2. Validate size, allowed inputs, and the proposed capability profile.
+3. Build/check through the sandbox launcher with a pinned local Go toolchain,
+   isolated cache, no secrets/network, and `CGO_ENABLED=0`.
+4. Run protected acceptance checks with bounded inputs in a fresh sandbox.
+5. Require runtime checks and, by default, human approval of the exact artifact
+   and capabilities.
+6. Register an immutable tool version for explicit assignment to an agent revision.
+
+Initially allow standard library only: no automatic dependency/toolchain downloads,
+install scripts, or `go generate`. Dependency expansion is a separate approval and
+supply-chain step. Tests execute arbitrary code and must stay confined; passing
+them is evidence, not a security proof. Promotion binds source, toolchain identity,
+build settings, test evidence, binary digest, and capabilities. Rebuilding or
+modifying a binary requires a new revision/promotion. Failures remain quarantined
+with a visible reason and cannot trigger permission expansion.
+
+Generated tools have no broker access by default. Any needed access uses a separate,
+scoped session and the same permission checks; children cannot acquire broader rights.
 
 ## 7. Control API, UI, and recovery
 
@@ -425,8 +580,10 @@ Commands include create/start/stop system, submit goal, send input, approve/reje
 revise, revoke, pause/resume, and cancel. Retried UI commands use idempotency keys
 so a double click or reconnect cannot create duplicate systems, runs, or inputs.
 
-The UI is an optional, separate Go client/server with server-rendered pages, but
-when connected it must support active control, not just visualization:
+The UI is an optional, separate Go client/server with server-rendered forms and
+periodic refresh; no JavaScript application or frontend build toolchain is required.
+The event stream remains available to later clients. When connected, the UI must
+support active control, not just visualization:
 
 | UI action | Required behavior |
 | --- | --- |
@@ -467,16 +624,23 @@ memory, artifacts, and history; deletion is separate. Starting a stopped system
 creates a new goal/run under current grants, without replaying canceled work,
 reactivating old timers, or resetting consumed system budgets.
 
-The UI owns no runtime state. Use restricted local sockets or authenticated
-loopback access, CSRF protection, and escaped output. Bound and authorize attachment
-ingestion. Display authorization, budget, queue, and provider errors explicitly.
+The UI owns no runtime state. Default to restricted local sockets for CLI/local
+clients and authenticated loopback access for the browser UI; loopback alone is
+not authentication. Use CSRF protection and escaped output. Bound and authorize
+attachment ingestion. Display authorization, budget, queue, and provider errors explicitly.
 Agent/goal controls remain scoped; daemon-wide controls must be clearly distinguished.
-On restart, reconcile leases, orphan processes, pending calls, and ambiguous effects
-before resuming. UI failure must not interrupt work or implicitly approve an action.
+Provide per-agent, per-goal, per-system, and global pause/cancel controls. Persist
+an owner and lease for each claimed activation; reconcile abandoned work, orphan
+processes, pending calls, and ambiguous effects before resuming after restart.
+Track process trees so daemon failure does not leave ungoverned workers consuming
+resources. UI failure must not interrupt work or implicitly approve an action.
 
-Persist authorization and state-changing audit records before dispatch; redact
-secrets. Storage/accounting failures block new privileged work, while emergency
-stop remains available. Correlate system/goal/task/event/activation/call records.
+Persist authorization and state-changing audit records before dispatch; keep audit
+append-only through the application, redact secrets, and avoid copying full
+sensitive payloads. Storage/accounting failures, including full disk, block new
+privileged work with an explicit error. Emergency stop/cancel remains available
+even if audit writes fail; report termination through the remaining diagnostic
+channel. Correlate system/goal/task/event/decision/activation/call records.
 Local audit is not tamper-proof against the host administrator.
 
 ## 8. Initial acceptance criteria
@@ -610,3 +774,42 @@ native-core version, and unavailable controls.
 Changes to native libraries, launch profiles, persistence, or broker boundaries
 require the corresponding integration scenarios to run again. Documentation-only
 changes need no Go build; validate embedded examples and references as applicable.
+
+## 10. Deliberate non-goals and deferred integrations
+
+No distributed scheduler, container platform, Kubernetes, external event queue,
+vector database, hot-loaded Go plugins, online model fine-tuning, unrestricted
+agent networking, automatic dependency installation, or self-modifying control
+plane. Add infrastructure only when a measured constraint demands it.
+
+Defer OPA/Rego and a general policy decision API until concrete authorization rules
+outgrow explicit runtime checks. Defer signed/off-host audit export until a deployment
+needs independent evidence. Configurable agent/tool definitions, governed durable
+events, and model endpoints with shared limits are the initial extension points,
+not a plugin system for scheduling, memory, or every runtime function.
+
+Add MCP tool or authenticated webhook adapters only for a needed integration.
+They must use existing broker/event authorization paths, not introduce alternate
+agent-to-agent protocols or bypass governance. Remote side effects cannot be
+undone by the local sandbox.
+
+## Appendix A. Research baseline and primary sources
+
+Checked 19 September 2026. This is source-level compatibility research, not a
+runtime sandbox test or security certification. Pin actual dependencies and
+rerun the launch and qualification checks when those dependencies change.
+
+The binding snapshot is nono-go commit
+`9ba65a11c842eed3644dcd2fb008a4a3f119f680`; its cited Linux-amd64 library records
+native core commit `1d1c88c9f98f0a1f3ff79cff1509713aaec7cdb0` (0.65.1).
+Upstream nono v0.78.0 documentation is comparison material, not evidence of binding
+feature parity. The binding requires Go 1.24+ and a C toolchain and supplies native
+libraries for Linux/macOS on amd64/arm64; this is not a claim of Microoperator
+support on those targets. Pin a compatible project toolchain and native artifacts.
+The [README](README.md) owns the diagnostic target and known qualification blockers.
+
+| Topic | Primary source |
+| --- | --- |
+| Upstream CLI network controls, not binding guarantees | [Networking, v0.78.0](https://github.com/nolabs-ai/nono/blob/v0.78.0/docs/cli/features/networking.mdx) |
+| nono Linux/macOS enforcement | [Landlock](https://github.com/nolabs-ai/nono/blob/v0.78.0/docs/cli/internals/landlock.mdx), [Seatbelt](https://github.com/nolabs-ai/nono/blob/v0.78.0/docs/cli/internals/seatbelt.mdx), [security model](https://github.com/nolabs-ai/nono/blob/v0.78.0/docs/cli/internals/security-model.mdx) |
+| nono-go API, build requirements, and native version | [Pinned README](https://github.com/nolabs-ai/nono-go/blob/9ba65a11c842eed3644dcd2fb008a4a3f119f680/README.md), [Apply and support API](https://github.com/nolabs-ai/nono-go/blob/9ba65a11c842eed3644dcd2fb008a4a3f119f680/nono.go), [bundled core version](https://github.com/nolabs-ai/nono-go/blob/9ba65a11c842eed3644dcd2fb008a4a3f119f680/internal/clib/linux_amd64/VERSION), [native core manifest](https://github.com/nolabs-ai/nono/blob/1d1c88c9f98f0a1f3ff79cff1509713aaec7cdb0/crates/nono/Cargo.toml) |

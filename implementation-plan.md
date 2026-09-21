@@ -1,6 +1,6 @@
 # Microoperator: implementation plan
 
-[spec.md](spec.md) defines the contract; [plan.md](plan.md) explains the architecture.
+[spec.md](spec.md) defines the contract and explains the architecture.
 This document tracks implementation order and milestone acceptance.
 [README.md](README.md) is authoritative for current commands and known limitations.
 
@@ -35,6 +35,8 @@ Already present:
 - [main.go](main.go): diagnostic parent, sandbox launcher, and fixed worker;
   private workspace, sanitized environment, bounded JSON IPC, readiness handshake,
   deadline/cancellation handling, and process-group cleanup.
+- [sandbox_linux.go](sandbox_linux.go) and [sandbox_darwin.go](sandbox_darwin.go):
+  platform runtime grants and Linux/amd64's supplemental socket-denying seccomp filter.
 - [main_test.go](main_test.go): framing, argument validation, and output bounds.
 - [sandbox_integration_test.go](sandbox_integration_test.go): actual subprocess
   filesystem/connection checks, thread/descendant inheritance, descriptor and
@@ -42,8 +44,12 @@ Already present:
 - [README.md](README.md): reproducible run/check commands and explicit limits.
 
 The hello exchange, unit/component checks, vet, and diagnostic integration checks
-including race detection have run successfully on macOS/arm64. These results
-cover the spike's measured behavior, not the entire target sandbox contract.
+including race detection previously ran successfully on macOS/arm64. On 21 September
+2026 they also passed on Linux/amd64 WSL2 with the supplemental socket filter;
+macOS was not rerun on that host. Linux checks cover the observed Unix-socket gap,
+descriptor isolation, and filter inheritance through real launcher/worker processes.
+These results cover the spike's measured behavior, not the entire target sandbox
+contract. See the [README](README.md#linuxwsl2-recheck) for verified scope.
 The complete qualification gate remains open; keep its technical blocker details
 in [README.md](README.md#before-enabling-agent-execution).
 
@@ -215,8 +221,8 @@ eligible prior revision without rewriting history or granting other systems acce
 - Run targeted checks during development, then the applicable complete suites at
   milestone exit. Update documentation and status only after the observable result
   and relevant failure paths work.
-- Preserve macOS as the current diagnostic target. Add another platform only with
-  its own verified profile and integration evidence.
+- Preserve the macOS and Linux/amd64 diagnostic profiles. Add another platform
+  only with its own verified profile and integration evidence.
 - The configuration-ownership and host-access alternatives in spec section 2.4
   remain unconfirmed. Use the documented conservative defaults; ask before expanding
   those boundaries rather than implementing both choices.

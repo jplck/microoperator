@@ -42,8 +42,8 @@ func integrationMain(m *testing.M) int {
 		}
 		return 0
 	}
-	if runtime.GOOS != "darwin" || !nono.IsSupported() {
-		fmt.Fprintln(os.Stderr, "integration preflight: this spike requires macOS confinement")
+	if !supportedSandboxPlatform() || !nono.IsSupported() {
+		fmt.Fprintln(os.Stderr, "integration preflight: supported macOS or Linux/amd64 confinement required")
 		return 1
 	}
 	root, err := os.MkdirTemp("", "microoperator-build-")
@@ -129,6 +129,10 @@ func confinedProbe(t *testing.T, root, mode, value string) message {
 	return reply
 }
 
+// TestSandboxBoundary checks actual OS behavior after the real launcher applies
+// confinement and execs a fresh probe worker. It does not ask a permission-preview
+// API what should happen. Temporary files and local listeners let us check both
+// allowed operations and denials without touching private data or real services.
 func TestSandboxBoundary(t *testing.T) {
 	root := workspace(t)
 	input := filepath.Join(root, "inputs", "note")
@@ -159,9 +163,10 @@ func TestSandboxBoundary(t *testing.T) {
 	if err := os.Symlink(outside, link); err != nil {
 		t.Fatal(err)
 	}
-	cases := []struct {
+	type boundaryCase struct {
 		name, mode, value, wantType, wantData string
-	}{
+	}
+	cases := []boundaryCase{
 		{"read inputs", "read", input, "result", "fixture"},
 		{"write scratch", "write", filepath.Join(root, "scratch", "written"), "result", "written"},
 		{"write output", "write", filepath.Join(root, "output", "written"), "result", "written"},
@@ -172,11 +177,63 @@ func TestSandboxBoundary(t *testing.T) {
 		{"deny tcp", "tcp", tcp.Addr().String(), "denied", ""},
 		{"deny udp", "udp", udp.LocalAddr().String(), "denied", ""},
 		{"deny unix", "unix", unixPath, "denied", ""},
-		// Characterize the pinned core's resolver exception; this is not strict network isolation.
-		{"known resolver socket allowance", "socket", "", "result", "created"},
 		{"new threads inherit", "threads", outside, "denied", ""},
 		{"descendant inherits", "descendant", outside, "denied", ""},
 		{"clean environment", "env", "MICROOPERATOR_TEST_SECRET", "result", ""},
+	}
+	listeners := []net.Listener{tcp, unix}
+	if runtime.GOOS == "linux" {
+		outsideUnix, err := net.Listen("unix", filepath.Join(t.TempDir(), "socket"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer outsideUnix.Close()
+		// Linux abstract Unix sockets live in a kernel namespace, not at a file
+		// path. A filesystem allowlist alone cannot exclude this communication.
+		abstractUnix, err := net.Listen("unix", "@microoperator-"+filepath.Base(root))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer abstractUnix.Close()
+		listeners = append(listeners, outsideUnix, abstractUnix)
+		cases = append(cases,
+			boundaryCase{"deny outside unix", "unix", outsideUnix.Addr().String(), "denied", ""},
+			boundaryCase{"deny abstract unix", "unix", abstractUnix.Addr().String(), "denied", ""},
+			boundaryCase{"deny socket creation", "socket", "", "denied", ""},
+			boundaryCase{"deny socket pairs", "socketpair", "", "denied", ""},
+			boundaryCase{"new threads inherit socket filter", "threads-socket", "", "denied", ""},
+			boundaryCase{"descendants inherit socket filter", "descendant-socket", "", "denied", ""},
+		)
+		for name, number := range map[string]int{
+			"io_uring setup": 425, "io_uring enter": 426, "io_uring register": 427,
+			"pidfd_getfd": 438, "x32 syscall": 0x40000000 | syscall.SYS_GETPID,
+		} {
+			cases = append(cases, boundaryCase{
+				"deny " + name, "syscall", strconv.Itoa(number), "denied", "",
+			})
+		}
+	} else {
+		// Characterize the pinned macOS resolver exception, not strict network isolation.
+		cases = append(cases, boundaryCase{
+			"known resolver socket allowance", "socket", "", "result", "created",
+		})
+	}
+	// A denied connection is only meaningful if the endpoint works. These
+	// unsandboxed positive controls establish that the listeners are reachable;
+	// worker probes must then return permission errors, not connection refused.
+	for _, listener := range listeners {
+		conn, err := net.DialTimeout(listener.Addr().Network(), listener.Addr().String(), time.Second)
+		if err != nil {
+			t.Fatalf("listener positive control: %v", err)
+		}
+		accepted, err := listener.Accept()
+		if err != nil {
+			conn.Close()
+			t.Fatal(err)
+		}
+		if err := errors.Join(conn.Close(), accepted.Close()); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -239,6 +296,10 @@ func TestLaunchFailureDoesNotRunWorker(t *testing.T) {
 	}
 }
 
+// TestInheritedDescriptorIsClosed deliberately gives the launcher an open file
+// and an already-connected socket. exec.Cmd.ExtraFiles places the selected handle
+// at descriptor 3 in the child. The worker must not retain it after the launcher's
+// exec, even though no new open/socket call would be needed to use that handle.
 func TestInheritedDescriptorIsClosed(t *testing.T) {
 	root := workspace(t)
 	secret, err := os.CreateTemp(t.TempDir(), "fixture-")
@@ -252,27 +313,69 @@ func TestInheritedDescriptorIsClosed(t *testing.T) {
 	if _, err := secret.Seek(0, io.SeekStart); err != nil {
 		t.Fatal(err)
 	}
+	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	socket := os.NewFile(uintptr(fds[0]), "socket fixture")
+	peer := os.NewFile(uintptr(fds[1]), "socket peer")
+	defer socket.Close()
+	defer peer.Close()
 	target, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, spikeBinary, "sandbox-exec", root, target, "-spike-probe=fd")
-	cmd.Env, cmd.Dir = workerEnv(root), root
-	cmd.ExtraFiles = []*os.File{secret}
-	cmd.Stdin = strings.NewReader("{\"type\":\"ping\"}\n")
-	output, err := cmd.Output()
+	for _, tc := range []struct {
+		mode string
+		file *os.File
+	}{{"fd", secret}, {"socket-fd", socket}} {
+		t.Run(tc.mode, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, spikeBinary, "sandbox-exec", root, target, "-spike-probe="+tc.mode)
+			cmd.Env, cmd.Dir = workerEnv(root), root
+			cmd.ExtraFiles = []*os.File{tc.file}
+			cmd.Stdin = strings.NewReader("{\"type\":\"ping\"}\n")
+			output, err := cmd.Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			reader := bufio.NewReaderSize(bytes.NewReader(output), maxFrame+1)
+			if _, err := readMessage(reader); err != nil {
+				t.Fatal(err)
+			}
+			reply, err := readMessage(reader)
+			if err != nil || reply != (message{Type: "result", Data: "not inherited"}) {
+				t.Fatalf("descriptor isolation: %+v, %v", reply, err)
+			}
+		})
+	}
+}
+
+// TestSocketStandardInputIsRejected covers the exception to closing descriptors
+// above 2: stdin must survive exec for normal IPC, but must not hide a socket.
+// Supply a real connected socket as stdin and require launch failure before any
+// worker readiness message. Rejecting setup is safer than silently keeping the
+// connection or closing stdin and starting a worker with broken communication.
+func TestSocketStandardInputIsRejected(t *testing.T) {
+	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader := bufio.NewReaderSize(bytes.NewReader(output), maxFrame+1)
-	if _, err := readMessage(reader); err != nil {
-		t.Fatal(err)
-	}
-	reply, err := readMessage(reader)
-	if err != nil || reply != (message{Type: "result", Data: "not inherited"}) {
-		t.Fatalf("descriptor isolation: %+v, %v", reply, err)
+	socket := os.NewFile(uintptr(fds[0]), "socket fixture")
+	peer := os.NewFile(uintptr(fds[1]), "socket peer")
+	defer socket.Close()
+	defer peer.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	root := workspace(t)
+	cmd := exec.CommandContext(ctx, spikeBinary, "sandbox-exec", root, spikeBinary, "worker")
+	cmd.Env, cmd.Dir, cmd.Stdin = workerEnv(root), root, socket
+	output, err := cmd.Output()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || len(output) != 0 ||
+		!strings.Contains(string(exitErr.Stderr), "standard descriptor 0 must not be a socket") {
+		t.Fatalf("socket stdin was not rejected before readiness: output=%q, err=%v", output, err)
 	}
 }
 
@@ -421,18 +524,43 @@ func probeOperation(mode, value string) (string, error) {
 			return "", err
 		}
 		return "created", syscall.Close(fd)
-	case "threads":
+	case "socketpair":
+		fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+		if err != nil {
+			return "", err
+		}
+		return "created", errors.Join(syscall.Close(fds[0]), syscall.Close(fds[1]))
+	case "syscall":
+		// Exercise low-level entry points directly, without allocating real
+		// io_uring resources or attempting to copy another process's handles.
+		// Unexpected errors remain test errors, not successful sandbox denials.
+		number, err := strconv.Atoi(value)
+		if err != nil {
+			return "", err
+		}
+		_, _, errno := syscall.RawSyscall(uintptr(number), 0, 0, 0)
+		if errno != 0 {
+			return "", errno
+		}
+		return "syscall succeeded", nil
+	case "threads", "threads-socket":
+		operation := "read"
+		if mode == "threads-socket" {
+			operation = "socket"
+		}
 		start := make(chan struct{})
 		results := make(chan error, 4)
 		var ready sync.WaitGroup
 		ready.Add(4)
 		for i := 0; i < 4; i++ {
 			go func() {
+				// Hold four OS threads at a barrier so this tests more than
+				// several goroutines taking turns on the same confined thread.
 				runtime.LockOSThread()
 				defer runtime.UnlockOSThread()
 				ready.Done()
 				<-start
-				_, err := os.ReadFile(value)
+				_, err := probeOperation(operation, value)
 				results <- err
 			}()
 		}
@@ -444,12 +572,16 @@ func probeOperation(mode, value string) (string, error) {
 			}
 		}
 		return "", os.ErrPermission
-	case "descendant":
+	case "descendant", "descendant-socket":
 		executable, err := os.Executable()
 		if err != nil {
 			return "", err
 		}
-		cmd := exec.Command(executable, "-spike-probe=read", "-spike-value="+value)
+		operation := "read"
+		if mode == "descendant-socket" {
+			operation = "socket"
+		}
+		cmd := exec.Command(executable, "-spike-probe="+operation, "-spike-value="+value)
 		cmd.Stdin = strings.NewReader("{\"type\":\"ping\"}\n")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
@@ -479,6 +611,15 @@ func probeOperation(mode, value string) (string, error) {
 			return "", err
 		}
 		return "inherited regular file descriptor", nil
+	case "socket-fd":
+		_, err := syscall.GetsockoptInt(3, syscall.SOL_SOCKET, syscall.SO_TYPE)
+		if errors.Is(err, syscall.EBADF) || errors.Is(err, syscall.ENOTSOCK) {
+			return "not inherited", nil
+		}
+		if err != nil {
+			return "", err
+		}
+		return "inherited socket descriptor", nil
 	default:
 		return "", fmt.Errorf("unknown test probe %q", mode)
 	}

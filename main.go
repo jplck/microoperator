@@ -73,7 +73,7 @@ func run(ctx context.Context, args []string) error {
 }
 
 func demo(ctx context.Context, data string) (err error) {
-	fmt.Fprintln(os.Stderr, "Diagnostic spike only: the pinned nono-go core retains macOS resolver IPC; do not use for untrusted code.")
+	fmt.Fprintln(os.Stderr, "Diagnostic spike only: confinement is not fully qualified; do not use for untrusted code. See README.md.")
 	root, err := os.MkdirTemp("", "microoperator-")
 	if err != nil {
 		return err
@@ -173,10 +173,35 @@ func writeMessage(writer io.Writer, value message) error {
 	return err
 }
 
+// supportedSandboxPlatform limits launch to platforms with an implemented
+// diagnostic profile. It is separate from nono.IsSupported: a kernel can support
+// nono while still lacking controls our worker profile needs.
+//
+// Linux is currently amd64-only because the supplemental seccomp filter checks
+// that syscall ABI and uses its syscall numbers. Enabling another architecture
+// requires adapting and verifying that filter, not just changing this boolean.
+// A true result permits the diagnostic spike, not arbitrary untrusted agent code.
+func supportedSandboxPlatform() bool {
+	// ponytail: qualify additional Linux architectures with real denial tests before enabling them.
+	return runtime.GOOS == "darwin" || (runtime.GOOS == "linux" && runtime.GOARCH == "amd64")
+}
+
+// sandboxExec turns a fresh launcher process into a confined worker or tool.
+// The supervisor starts this child; the daemon must never sandbox itself, since
+// it still needs its database, credentials, and approved network access.
+//
+// Setup first validates paths and builds the nono capability set without applying
+// restrictions. It then arranges descriptor closure, locks the calling goroutine
+// to its OS thread, installs the platform filter, applies nono, and execs target.
+// Exec replaces the launcher program in the same process; it does not start an
+// unconstrained worker beside it. Only the replacement program runs worker logic.
+//
+// Ordering matters: native restrictions attach to OS execution state, not to a Go
+// goroutine's identity. Applying them on one thread and executing the worker on
+// another could lose confinement. No failure path is allowed to continue to exec.
 func sandboxExec(root, target string, args []string) error {
-	// ponytail: macOS-only confinement; enable another OS only after its real denial tests pass.
-	if runtime.GOOS != "darwin" || !nono.IsSupported() {
-		return errors.New("this sandbox spike requires supported macOS confinement")
+	if !supportedSandboxPlatform() || !nono.IsSupported() {
+		return errors.New("this sandbox spike requires supported macOS or Linux/amd64 confinement")
 	}
 	root, err := filepath.EvalSymlinks(root)
 	if err != nil {
@@ -218,10 +243,8 @@ func sandboxExec(root, target string, args []string) error {
 			return fmt.Errorf("grant %s: %w", name, err)
 		}
 	}
-	for _, path := range []string{"/System/Library", "/usr/lib"} {
-		if err := caps.AllowPath(path, nono.AccessRead); err != nil {
-			return fmt.Errorf("grant runtime path %s: %w", path, err)
-		}
+	if err := configurePlatformSandbox(caps); err != nil {
+		return err
 	}
 	for _, path := range []string{"/dev/urandom", "/dev/random"} {
 		if err := caps.AllowFile(path, nono.AccessRead); err != nil {
@@ -234,21 +257,16 @@ func sandboxExec(root, target string, args []string) error {
 	if err := caps.SetNetworkMode(nono.NetworkBlocked); err != nil {
 		return err
 	}
-	// nono retains resolver IPC. These rules only tighten other unused IPC; see spec.md.
-	for _, rule := range []string{
-		"(deny mach-lookup)",
-		"(deny mach-per-user-lookup)",
-		"(deny ipc-posix-shm*)",
-	} {
-		if err := caps.AddPlatformRule(rule); err != nil {
-			return fmt.Errorf("tighten sandbox: %w", err)
-		}
-	}
 	if err := closeOnExecDescriptors(); err != nil {
 		return err
 	}
 	runtime.LockOSThread()
-	// Stay on the confined thread until exec, including the error path.
+	// Deliberately do not defer UnlockOSThread. Successful exec never returns;
+	// failure returns to main only to report the error and exit this child.
+	// No worker code may run between installing restrictions and exec.
+	if err := applyPlatformSandbox(); err != nil {
+		return fmt.Errorf("apply platform sandbox: %w", err)
+	}
 	if err := nono.Apply(caps); err != nil {
 		return fmt.Errorf("apply nono sandbox: %w", err)
 	}
@@ -258,7 +276,28 @@ func sandboxExec(root, target string, args []string) error {
 	return nil
 }
 
+// closeOnExecDescriptors prevents handles opened before confinement from becoming
+// a second route out of the worker. Blocking new socket creation is insufficient
+// if a worker inherits an already-connected socket and can simply read/write it.
+//
+// Descriptors 0, 1, and 2 are stdin, stdout, and stderr. The supervisor chooses the
+// worker's communication pipes; this function additionally rejects sockets in
+// those reserved slots rather than silently preserving a connection.
+//
+// Other descriptors are marked FD_CLOEXEC: the kernel closes them when exec
+// succeeds. We do not close them immediately, because the still-running launcher
+// and Go runtime may need some of them during setup. This helper must run before
+// nono.Apply, while the launcher can still inspect its descriptor directory.
 func closeOnExecDescriptors() error {
+	for fd := 0; fd < 3; fd++ {
+		var stat syscall.Stat_t
+		if err := syscall.Fstat(fd, &stat); err != nil {
+			return fmt.Errorf("inspect standard descriptor %d: %w", fd, err)
+		}
+		if stat.Mode&syscall.S_IFMT == syscall.S_IFSOCK {
+			return fmt.Errorf("standard descriptor %d must not be a socket", fd)
+		}
+	}
 	entries, err := os.ReadDir("/dev/fd")
 	if err != nil {
 		return fmt.Errorf("enumerate inherited descriptors: %w", err)
@@ -271,6 +310,9 @@ func closeOnExecDescriptors() error {
 		if fd < 3 {
 			continue
 		}
+		// The directory listing is a snapshot. A descriptor, including the one
+		// used to enumerate /dev/fd, may already have closed by this point.
+		// EBADF means there is nothing left to inherit; other failures abort.
 		_, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_SETFD, syscall.FD_CLOEXEC)
 		if errno != 0 && errno != syscall.EBADF {
 			return fmt.Errorf("mark descriptor %d close-on-exec: %w", fd, errno)
