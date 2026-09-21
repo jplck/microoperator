@@ -126,7 +126,7 @@ func TestControlAuthorizationValidationAndRevisions(t *testing.T) {
 	if response := controlRequest(handler, "POST", "/v1/systems/"+first.ID+"/start", "start", `{}`, fixtureControlToken); response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("execution accepted without a lifecycle owner: %d", response.Code)
 	}
-	foreign, err := store.createSystem(context.Background(), "another-principal", "foreign", createSystemCommand{Launch: "research"}, cfg, configID)
+	foreign, err := store.CreateSystem(context.Background(), "another-principal", "foreign", createSystemCommand{Launch: "research"}, cfg, configID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +150,7 @@ func TestControlPaginationAndStorageFailures(t *testing.T) {
 	store, configID := fixtureStore(t, cfg)
 	handler := newControlHandler(store, cfg, configID, fixtureControlToken, log.New(&bytes.Buffer{}, "", 0), nil)
 	for i := 0; i < 21; i++ {
-		if _, err := store.createSystem(context.Background(), localAdministrator, fmt.Sprintf("create-%d", i),
+		if _, err := store.CreateSystem(context.Background(), localAdministrator, fmt.Sprintf("create-%d", i),
 			createSystemCommand{Launch: "research"}, cfg, configID); err != nil {
 			t.Fatal(err)
 		}
@@ -183,7 +183,7 @@ func TestControlPaginationAndStorageFailures(t *testing.T) {
 			t.Fatalf("invalid cursor accepted: %s", query)
 		}
 	}
-	if _, err := store.db.Exec(`CREATE TRIGGER fail_api_audit BEFORE INSERT ON audit
+	if _, err := testDB(t, store).Exec(`CREATE TRIGGER fail_api_audit BEFORE INSERT ON audit
 		BEGIN SELECT RAISE(ABORT, 'private storage diagnostic'); END;`); err != nil {
 		t.Fatal(err)
 	}
@@ -222,8 +222,8 @@ func TestStateFilesArePrivateAndNeverFollowSymlinks(t *testing.T) {
 	if err := os.Symlink(target, filepath.Join(root, "state.db")); err != nil {
 		t.Fatal(err)
 	}
-	if store, err := openStore(context.Background(), filepath.Join(root, "state.db")); err == nil {
-		store.db.Close()
+	if store, err := openTestStore(t, context.Background(), filepath.Join(root, "state.db")); err == nil {
+		store.Close()
 		t.Fatal("symlinked database accepted")
 	}
 	data, err := os.ReadFile(target)

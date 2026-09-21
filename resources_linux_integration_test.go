@@ -187,7 +187,7 @@ func platformResourceProbe(mode, value string) (string, error) {
 
 func resourceTestProfile(group string) sandboxConfig {
 	return sandboxConfig{Read: []string{"inputs"}, ReadWrite: []string{"scratch", "output"}, Network: "blocked",
-		Resources: &resourceLimits{MemoryBytes: 256 << 20, WorkspaceBytes: 8 << 20, Processes: 128, CPUPercent: 100}, resourceRoot: group}
+		Resources: &resourceLimits{MemoryBytes: 256 << 20, WorkspaceBytes: 8 << 20, Processes: 128, CPUPercent: 100}, ResourceRoot: group}
 }
 
 func activeResourceGroup(root string) (string, error) {

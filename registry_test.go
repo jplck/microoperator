@@ -5,7 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
+
 	"fmt"
 	"io"
 	"log"
@@ -51,7 +51,7 @@ func claimAction(t *testing.T, engine *executionEngine, name string, args any) e
 	if err := engine.broker.settle(context.Background(), admitted, providerResult{Known: true, Input: 11, Output: 7, Actions: []modelToolCall{action}}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	record, err := engine.store.getSystem(context.Background(), localAdministrator, e.SystemID)
+	record, err := engine.store.GetSystem(context.Background(), localAdministrator, e.SystemID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestRegistryScopeDraftsAndRevocation(t *testing.T) {
 	cfg := teamConfiguration(t)
 	engine, id := fixtureTeamEngine(t, cfg)
 	first := fixtureCall(t, engine.broker, id, "first", false)
-	second, err := engine.store.createSystem(context.Background(), localAdministrator, "second", createSystemCommand{Launch: "research"}, cfg, id)
+	second, err := engine.store.CreateSystem(context.Background(), localAdministrator, "second", createSystemCommand{Launch: "research"}, cfg, id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestRegistryScopeDraftsAndRevocation(t *testing.T) {
 		t.Fatal("revoked pinned version executed")
 	}
 	assertCount(t, engine.store, "tool_calls", 0)
-	if _, err := engine.store.db.Exec(`UPDATE tool_drafts SET content='replaced'`); err == nil {
+	if _, err := testDB(t, engine.store).Exec(`UPDATE tool_drafts SET content='replaced'`); err == nil {
 		t.Fatal("draft content was mutable")
 	}
 }
@@ -177,11 +177,11 @@ func TestDelegationCannotBorrowRecipientAuthority(t *testing.T) {
 	if _, err := engine.invokeTool(context.Background(), recipientCall, recipientCall.Actions[0]); err == nil {
 		t.Fatal("confused-deputy execution accepted")
 	}
-	if _, err := engine.store.db.Exec(`UPDATE agent_revisions SET definition='{}'`); err == nil {
+	if _, err := testDB(t, engine.store).Exec(`UPDATE agent_revisions SET definition='{}'`); err == nil {
 		t.Fatal("agent revision was mutable")
 	}
 	var used int64
-	if err := engine.store.db.QueryRow(`SELECT used_tokens FROM agent_usage WHERE system_id=? AND agent_id=? AND goal_id=?`, root.SystemID, caller.ID, root.GoalID).Scan(&used); err != nil || used != 36 {
+	if err := testDB(t, engine.store).QueryRow(`SELECT used_tokens FROM agent_usage WHERE system_id=? AND agent_id=? AND goal_id=?`, root.SystemID, caller.ID, root.GoalID).Scan(&used); err != nil || used != 36 {
 		t.Fatalf("delegation escaped caller aggregate budget: used=%d err=%v", used, err)
 	}
 }
@@ -202,7 +202,7 @@ func TestToolSessionAndSchemaDenials(t *testing.T) {
 			t.Fatal("foreign session accepted")
 		}
 	}
-	def, _ := cfg.tool("runtime.text.analyze")
+	def, _ := cfg.Tool("runtime.text.analyze")
 	schema, err := executableSchema("runtime.text.analyze", def)
 	if err != nil {
 		t.Fatal(err)
@@ -212,57 +212,8 @@ func TestToolSessionAndSchemaDenials(t *testing.T) {
 			t.Fatalf("invalid arguments accepted: %s", arguments)
 		}
 	}
-	if _, err := engine.store.db.Exec(`INSERT INTO call_groups(call_id,system_id,group_name) VALUES(?,'foreign','bad')`, e0.CallID); err == nil {
+	if _, err := testDB(t, engine.store).Exec(`INSERT INTO call_groups(call_id,system_id,group_name) VALUES(?,'foreign','bad')`, e0.CallID); err == nil {
 		t.Fatal("call groups lost system scoping")
-	}
-}
-
-func TestMailboxDeduplicationRetryAndDeadLetter(t *testing.T) {
-	cfg := fixtureConfiguration(t)
-	engine, id := fixtureTeamEngine(t, cfg)
-	fixtureCall(t, engine.broker, id, "one", false)
-	_, e, found, err := engine.claim(context.Background(), time.Now())
-	if err != nil || !found {
-		t.Fatalf("claim: %v %v", found, err)
-	}
-	if _, err := engine.store.db.Exec(`INSERT INTO mailboxes(system_id,event_id,recipient,task_id,state) VALUES(?,?,?,?,'pending')`, e.SystemID, e.EventID, e.AgentID, e.TaskID); err == nil {
-		t.Fatal("duplicate event/recipient accepted")
-	}
-	for attempt := 1; attempt <= 3; attempt++ {
-		if err := engine.finishDelivery(context.Background(), e, errors.New("fixture worker setup failure"), false); err != nil {
-			t.Fatal(err)
-		}
-		if attempt < 3 {
-			var due int64
-			if err := engine.store.db.QueryRow(`SELECT not_before FROM mailboxes WHERE event_id=?`, e.EventID).Scan(&due); err != nil {
-				t.Fatal(err)
-			}
-			_, e, found, err = engine.claim(context.Background(), time.UnixMilli(due))
-			if err != nil || !found {
-				t.Fatalf("retry claim: %v %v", found, err)
-			}
-		}
-	}
-	var state string
-	var attempts int
-	if err := engine.store.db.QueryRow(`SELECT state,attempts FROM mailboxes WHERE event_id=?`, e.EventID).Scan(&state, &attempts); err != nil {
-		t.Fatal(err)
-	}
-	if state != "dead" || attempts != 3 {
-		t.Fatalf("unbounded retries: %s %d", state, attempts)
-	}
-	assertCount(t, engine.store, "model_attempts", 0)
-	tx, err := engine.store.db.BeginTx(context.Background(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := auditExecution(context.Background(), tx, e.SystemID, "fixture", "fixture", 1, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	tx.Rollback()
-	var count int
-	if err := engine.store.db.QueryRow(`SELECT count(*) FROM audit WHERE action='fixture'`).Scan(&count); err != nil || count != 0 {
-		t.Fatal("transactional event/audit rollback failed")
 	}
 }
 
@@ -292,7 +243,7 @@ func TestScopedPauseResumeStopAndDurableInput(t *testing.T) {
 			if _, _, found, err := engine.claim(context.Background(), time.Now()); err != nil || found {
 				t.Fatalf("paused work claimed: %v %v", found, err)
 			}
-			if err := engine.store.recoverExecutions(context.Background()); err != nil {
+			if err := engine.store.RecoverExecutions(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 			if _, _, found, err := engine.claim(context.Background(), time.Now()); err != nil || found {
@@ -344,7 +295,7 @@ func TestRecoveryReusesCompletedModelAndToolReceipt(t *testing.T) {
 	fixtureCall(t, engine.broker, id, "recover", false)
 	e := claimAction(t, engine, "runtime.agent.propose", proposeAgentArgs{Name: "child", Prompt: "reviewed prompt", Tools: []string{}, TokenBudget: 1000})
 	result := invokeAction(t, engine, e)
-	if err := engine.store.recoverExecutions(context.Background()); err != nil {
+	if err := engine.store.RecoverExecutions(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	engine.owner = "recovered-owner"
@@ -384,7 +335,7 @@ func TestWaitingDelegationAndAppliedResultSurviveRecovery(t *testing.T) {
 	delegate := claimAction(t, engine, "runtime.task.delegate", delegateArgs{AgentID: child.ID, Prompt: "child work"})
 	invokeAction(t, engine, delegate)
 	// Crash after delegation commits, before the waiting worker acknowledges.
-	if err := engine.store.recoverExecutions(context.Background()); err != nil {
+	if err := engine.store.RecoverExecutions(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	_, e, found, err := engine.claim(context.Background(), time.Now())
@@ -403,7 +354,7 @@ func TestWaitingDelegationAndAppliedResultSurviveRecovery(t *testing.T) {
 	if err != nil || !found || parent.AgentID != root.AgentID {
 		t.Fatalf("parent not woken: %+v %v", parent, err)
 	}
-	if err := engine.store.recoverExecutions(context.Background()); err != nil {
+	if err := engine.store.RecoverExecutions(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	_, again, found, err := engine.claim(context.Background(), time.Now())
@@ -440,10 +391,10 @@ func TestUnknownToolOutcomeCannotReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := engine.store.db.Exec(`INSERT INTO tool_calls(system_id,call_id,tool_call_id,task_id,name,version,arguments_hash,state) VALUES(?,?,?,?,?,1,?,'running')`, e.SystemID, e.CallID, e.Actions[0].ID, e.TaskID, "runtime.text.analyze", hash); err != nil {
+	if _, err := testDB(t, engine.store).Exec(`INSERT INTO tool_calls(system_id,call_id,tool_call_id,task_id,name,version,arguments_hash,state) VALUES(?,?,?,?,?,1,?,'running')`, e.SystemID, e.CallID, e.Actions[0].ID, e.TaskID, "runtime.text.analyze", hash); err != nil {
 		t.Fatal(err)
 	}
-	if err := engine.store.recoverExecutions(context.Background()); err != nil {
+	if err := engine.store.RecoverExecutions(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	task, err := engine.taskSnapshot(context.Background(), e.SystemID, e.TaskID)
@@ -514,7 +465,7 @@ func TestDelayedRevocationAndNarrowToolProfile(t *testing.T) {
 			engine, id := fixtureTeamEngine(t, cfg)
 			root := fixtureCall(t, engine.broker, id, "denial", false)
 			if revoke {
-				if _, err := engine.store.db.Exec(`INSERT INTO tool_revocations(system_id,name,version) VALUES(?,'runtime.text.analyze',1)`, root.SystemID); err != nil {
+				if _, err := testDB(t, engine.store).Exec(`INSERT INTO tool_revocations(system_id,name,version) VALUES(?,'runtime.text.analyze',1)`, root.SystemID); err != nil {
 					t.Fatal(err)
 				}
 				if _, _, found, err := engine.claim(context.Background(), time.Now()); err != nil || found {
@@ -556,98 +507,8 @@ func TestFullMailboxDoesNotPreventStop(t *testing.T) {
 		t.Fatalf("full mailbox blocked stop: %s", response.Body.String())
 	}
 	var pending int
-	if err := engine.store.db.QueryRow(`SELECT count(*) FROM mailboxes WHERE state IN ('pending','leased')`).Scan(&pending); err != nil || pending != 0 {
+	if err := testDB(t, engine.store).QueryRow(`SELECT count(*) FROM mailboxes WHERE state IN ('pending','leased')`).Scan(&pending); err != nil || pending != 0 {
 		t.Fatalf("stopped input lost without receipt: %d %v", pending, err)
 	}
 	assertCount(t, engine.store, "model_attempts", 0)
-}
-
-func TestTerminalDeliveryLimitFailsOnlyItsContinuation(t *testing.T) {
-	cfg := teamConfiguration(t)
-	engine, id := fixtureTeamEngine(t, cfg)
-	root := fixtureCall(t, engine.broker, id, "bounded-reply", false)
-	propose := claimAction(t, engine, "runtime.agent.propose", proposeAgentArgs{Name: "child", Prompt: "work", Tools: []string{}, TokenBudget: 10000})
-	var child struct {
-		ID string `json:"agent_id"`
-	}
-	if err := json.Unmarshal([]byte(invokeAction(t, engine, propose)), &child); err != nil {
-		t.Fatal(err)
-	}
-	finishAction(t, engine, propose)
-	delegate := claimAction(t, engine, "runtime.task.delegate", delegateArgs{AgentID: child.ID, Prompt: "bounded"})
-	var result struct {
-		ID string `json:"task_id"`
-	}
-	if err := json.Unmarshal([]byte(invokeAction(t, engine, delegate)), &result); err != nil {
-		t.Fatal(err)
-	}
-	finishAction(t, engine, delegate)
-	tx, err := engine.store.db.BeginTx(context.Background(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer tx.Rollback()
-	parent, err := readTask(context.Background(), tx, root.SystemID, root.TaskID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	task, err := readTask(context.Background(), tx, root.SystemID, result.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cause := ""
-	for i := 0; i <= maxEventDepth; i++ {
-		cause, err = emitEvent(context.Background(), tx, parent, "task.progress", "runtime", cause, struct{}{}, time.Now())
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := terminateTask(context.Background(), tx, task, "failed", "", "fixture failure", "runtime", cause, time.Now()); err != nil {
-		t.Fatalf("delivery limit poisoned transaction: %v", err)
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatal(err)
-	}
-	parent, err = engine.taskSnapshot(context.Background(), root.SystemID, root.TaskID)
-	if err != nil || parent.State != "rejected" || !strings.Contains(parent.Reason, "child result delivery rejected") {
-		t.Fatalf("lost continuation: %+v %v", parent, err)
-	}
-	if _, _, found, err := engine.claim(context.Background(), time.Now()); err != nil || found {
-		t.Fatalf("terminal work reopened: %v %v", found, err)
-	}
-	if !engine.broker.available() {
-		t.Fatal("scoped event limit disabled the broker")
-	}
-}
-
-func TestMailboxRejectsEventAmplification(t *testing.T) {
-	cfg := fixtureConfiguration(t)
-	engine, id := fixtureTeamEngine(t, cfg)
-	e := fixtureCall(t, engine.broker, id, "events", false)
-	tx, err := engine.store.db.BeginTx(context.Background(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer tx.Rollback()
-	task, err := readTask(context.Background(), tx, e.SystemID, e.TaskID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cause := ""
-	for i := 0; i <= maxEventDepth; i++ {
-		cause, err = emitEvent(context.Background(), tx, task, "task.progress", "runtime", cause, map[string]string{"message": "fixture"}, time.Now())
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := emitEvent(context.Background(), tx, task, "task.progress", "runtime", cause, struct{}{}, time.Now()); err == nil {
-		t.Fatal("causation depth was unbounded")
-	}
-	if _, err := emitEvent(context.Background(), tx, task, "user.input", localAdministrator, "", strings.Repeat("x", maxEventBytes+1), time.Now()); err == nil {
-		t.Fatal("event payload was unbounded")
-	}
-	_, err = tx.Exec(`UPDATE events SET source='spoofed'`)
-	if err == nil {
-		t.Fatal("trusted envelope could be overwritten")
-	}
 }

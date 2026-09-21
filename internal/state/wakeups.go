@@ -1,6 +1,4 @@
-//go:build darwin || linux
-
-package main
+package state
 
 import (
 	"context"
@@ -10,7 +8,7 @@ import (
 	"time"
 )
 
-func hasTaskTool(t taskRecord, name string) bool {
+func HasTaskTool(t TaskRecord, name string) bool {
 	for _, pin := range t.Tools {
 		if pin.Name == name {
 			return true
@@ -19,21 +17,21 @@ func hasTaskTool(t taskRecord, name string) bool {
 	return false
 }
 
-func (engine *executionEngine) wakeEligible(ctx context.Context, tx *sql.Tx, t taskRecord, now time.Time) (bool, string, error) {
+func (engine *workflow) wakeEligible(ctx context.Context, tx *sql.Tx, t TaskRecord, now time.Time) (bool, string, error) {
 	var systemState, agentState, goalControl string
 	var deadline int64
 	if err := tx.QueryRowContext(ctx, `SELECT s.state,a.state,g.control,g.deadline FROM systems s JOIN agents a USING(system_id)
 	 JOIN goals g USING(system_id) WHERE s.system_id=? AND a.agent_id=? AND g.goal_id=?`, t.SystemID, t.AgentID, t.GoalID).Scan(&systemState, &agentState, &goalControl, &deadline); err != nil {
 		return false, "", err
 	}
-	if taskTerminal(t.State) || t.Control == "stopped" || goalControl == "stopped" || agentState == "stopped" || systemState == "stopped" || systemState == "stopping" {
+	if TaskTerminal(t.State) || t.Control == "stopped" || goalControl == "stopped" || agentState == "stopped" || systemState == "stopped" || systemState == "stopping" {
 		return false, "target stopped or terminal", nil
 	}
 	if deadline <= now.UnixMilli() {
 		return false, "goal expired", nil
 	}
 	if err := authorizePins(ctx, tx, engine.cfg, t.SystemID, t.Tools); err != nil {
-		if deniedTask(err) {
+		if DeniedTask(err) {
 			return false, err.Error(), nil
 		}
 		return false, "", err
@@ -44,7 +42,7 @@ func (engine *executionEngine) wakeEligible(ctx context.Context, tx *sql.Tx, t t
 	return true, "", nil
 }
 
-func (engine *executionEngine) pumpWakeups(ctx context.Context, tx *sql.Tx, now time.Time) error {
+func (engine *workflow) pumpWakeups(ctx context.Context, tx *sql.Tx, now time.Time) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_revisions WHERE EXISTS(SELECT 1 FROM memory_heads h WHERE h.system_id=memory_revisions.system_id AND h.memory_id=memory_revisions.memory_id AND (h.expires_at<=? OR h.state='deleted'))`, now.UnixMilli()); err != nil {
 		return err
 	}
@@ -114,7 +112,7 @@ func (engine *executionEngine) pumpWakeups(ctx context.Context, tx *sql.Tx, now 
 		if err != nil {
 			return err
 		}
-		if s.creator != localAdministrator && !hasTaskTool(t, "runtime.schedule.create") {
+		if s.creator != localAdministrator && !HasTaskTool(t, "runtime.schedule.create") {
 			ready, reason = false, "scheduling grant unavailable"
 		}
 		state := "active"
@@ -144,7 +142,7 @@ func (engine *executionEngine) pumpWakeups(ctx context.Context, tx *sql.Tx, now 
 			Content string `json:"content"`
 		}{fmt.Sprintf("Scheduled context (untrusted data; %s): %s", s.id, s.content)}, now)
 		if emitErr != nil {
-			if !deniedTask(emitErr) {
+			if !DeniedTask(emitErr) {
 				return emitErr
 			}
 			if _, err := tx.ExecContext(ctx, `UPDATE schedules SET state='failed',reason=? WHERE system_id=? AND schedule_id=?`, emitErr.Error(), s.system, s.id); err != nil {
@@ -160,7 +158,7 @@ func (engine *executionEngine) pumpWakeups(ctx context.Context, tx *sql.Tx, now 
 		if s.expression != "" && s.remaining > 1 {
 			// Coalesce missed occurrences into this single event. The next cursor
 			// is after now, never a replay of each missed wall-clock instant.
-			future, err := nextCron(s.expression, s.zone, now)
+			future, err := NextCron(s.expression, s.zone, now)
 			if err != nil {
 				return err
 			}
@@ -176,7 +174,7 @@ func (engine *executionEngine) pumpWakeups(ctx context.Context, tx *sql.Tx, now 
 	return nil
 }
 
-func (engine *executionEngine) notifySubscriptions(ctx context.Context, tx *sql.Tx, source taskRecord, kind, scope, owner, cause, reference string, now time.Time) error {
+func (engine *workflow) notifySubscriptions(ctx context.Context, tx *sql.Tx, source TaskRecord, kind, scope, owner, cause, reference string, now time.Time) error {
 	rows, err := tx.QueryContext(ctx, `SELECT subscription_id,task_id,creator,scope,expires_at FROM subscriptions WHERE system_id=? AND type=? AND state='active' ORDER BY subscription_id`, source.SystemID, kind)
 	if err != nil {
 		return err
@@ -217,10 +215,10 @@ func (engine *executionEngine) notifySubscriptions(ctx context.Context, tx *sql.
 		if s.expires <= now.UnixMilli() {
 			ready, reason = false, "subscription expired"
 		}
-		if s.creator != localAdministrator && !hasTaskTool(t, "runtime.events.subscribe") {
+		if s.creator != localAdministrator && !HasTaskTool(t, "runtime.events.subscribe") {
 			ready, reason = false, "subscription grant unavailable"
 		}
-		if kind == "memory.changed" && !hasTaskTool(t, "runtime.memory.search") {
+		if kind == "memory.changed" && !HasTaskTool(t, "runtime.memory.search") {
 			ready, reason = false, "memory retrieval grant unavailable"
 		}
 		if reason != "" {
@@ -239,7 +237,7 @@ func (engine *executionEngine) notifySubscriptions(ctx context.Context, tx *sql.
 			Content string `json:"content"`
 		}{fmt.Sprintf("Notification (untrusted data): %s %s", kind, reference)}, now)
 		if emitErr != nil {
-			if !deniedTask(emitErr) {
+			if !DeniedTask(emitErr) {
 				return emitErr
 			}
 			if _, err := tx.ExecContext(ctx, `UPDATE subscriptions SET state='failed',reason=? WHERE system_id=? AND subscription_id=?`, emitErr.Error(), t.SystemID, s.id); err != nil {

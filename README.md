@@ -615,6 +615,27 @@ there is no unsandboxed fallback. On Linux/amd64, the extra seccomp filter denie
 rejects alternate syscall ABIs. It cannot be loosened by a worker and is inherited
 across exec, new threads, and descendants. The parent's networking is unchanged.
 
+## Persistence architecture
+
+[`internal/state`](internal/state) contains the SQLite implementation, migrations,
+shared persisted types, scoped artifacts, and typed workflow operations such as
+`SearchMemory`, `AdmitModelCall`, `Claim`, and `FinishDelivery`. HTTP handlers,
+the model broker, and the execution engine no longer issue SQL or access database
+handles. Tool and generated-evaluation preparation/completion are separate from
+actual subprocess execution.
+
+Transactions still include their associated audit records, events, receipts, and
+budget reservations. SQLite remains the only backend, with the same single
+connection, WAL/durability settings, schema 5, and JSON schema 1. No ORM, generic
+repository framework, or extra dependency is introduced. A future backend would
+implement the same workflows and qualify its migration, locking, and transaction
+semantics; it would not be a driver-only replacement.
+
+Storage-internal tests live alongside the implementation. Runtime/API tests call
+the public workflows and may inspect their own temporary database through a
+separate test-only connection. An architecture check rejects production SQL
+imports outside storage and database types in its public contract.
+
 ## Checks
 
 ```sh

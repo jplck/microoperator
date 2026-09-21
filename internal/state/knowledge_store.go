@@ -1,6 +1,4 @@
-//go:build darwin || linux
-
-package main
+package state
 
 const schemaV4 = `
 CREATE TABLE memory_heads(

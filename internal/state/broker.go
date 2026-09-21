@@ -1,0 +1,358 @@
+package state
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+
+	"math"
+
+	"time"
+)
+
+func authorizeCall(ctx context.Context, tx *sql.Tx, session ExecutionRecord) (ExecutionRecord, error) {
+	current, err := readExecution(ctx, tx, session.SystemID, session.CallID)
+	if err != nil {
+		return current, err
+	}
+	if current.ActivationID != session.ActivationID || current.ActivationOwner != session.ActivationOwner ||
+		current.Revision != session.Revision || current.GoalID != session.GoalID {
+		return current, Invalid("session", "model call is outside this activation")
+	}
+	return current, nil
+}
+
+func (b *admission) queue(ctx context.Context, session ExecutionRecord) (err error) {
+	tx, err := b.store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer rollback(tx, &err)
+	e, err := authorizeCall(ctx, tx, session)
+	if err != nil {
+		return err
+	}
+	if e.State == "awaiting_worker" {
+		if _, err := tx.ExecContext(ctx, `UPDATE model_calls SET state='queued' WHERE call_id=?`, e.CallID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE goals SET state='waiting' WHERE system_id=? AND goal_id=?`, e.SystemID, e.GoalID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func terminalCall(ctx context.Context, tx *sql.Tx, e ExecutionRecord, state, reason string) error {
+	_, err := tx.ExecContext(ctx, `UPDATE model_calls SET state=?,reason=? WHERE system_id=? AND call_id=?`,
+		state, reason, e.SystemID, e.CallID)
+	return err
+}
+
+// admit is a single durable decision: grants, fair ordering, every shared quota,
+// and both budgets pass before any attempt is recorded or network request starts.
+// One active goal per system makes system round-robin also goal-fair.
+func (b *admission) admit(ctx context.Context, session ExecutionRecord, now time.Time) (result ExecutionRecord, admitted bool, err error) {
+	tx, err := b.store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return result, false, err
+	}
+	defer rollback(tx, &err)
+	result, err = authorizeCall(ctx, tx, session)
+	if err != nil {
+		return result, false, err
+	}
+	if result.State != "queued" {
+		return result, false, nil
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT c.system_id,c.call_id FROM model_calls c JOIN systems s USING(system_id)
+	 WHERE c.state='queued' ORDER BY s.last_admission,c.sequence LIMIT ?`, MaxOperators)
+	if err != nil {
+		return result, false, err
+	}
+	var ids [][2]string
+	for rows.Next() {
+		var id [2]string
+		if err := rows.Scan(&id[0], &id[1]); err != nil {
+			return result, false, errors.Join(err, rows.Close())
+		}
+		ids = append(ids, id)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return result, false, err
+	}
+	for _, id := range ids {
+		e, err := readExecution(ctx, tx, id[0], id[1])
+		if err != nil {
+			return result, false, err
+		}
+		record, err := readSystem(ctx, tx, localAdministrator, e.SystemID)
+		if err != nil {
+			return result, false, err
+		}
+		record, err = b.cfg.Inspect(record)
+		if err != nil {
+			return result, false, err
+		}
+		reason := ""
+		switch {
+		case record.State != "running" && record.State != "paused":
+			reason = "system stopped or stopping"
+		case record.Revision != e.Revision || record.BlockedReason != "":
+			reason = "model grant revoked or administrative definitions changed"
+		case now.UnixMilli() >= e.WaitDeadline || now.UnixMilli() >= e.Deadline:
+			reason = "queue deadline exceeded"
+		case e.Reservation > record.RemainingTokens || e.Reservation > e.GoalBudget-e.GoalUsed-e.GoalReserved:
+			reason = "budget exhausted"
+		}
+		if reason == "" {
+			reason, err = checkTaskAdmission(ctx, tx, b.cfg, e)
+			if err != nil {
+				return result, false, err
+			}
+		}
+		if reason != "" {
+			if err := terminalCall(ctx, tx, e, "rejected", reason); err != nil {
+				return result, false, err
+			}
+			continue
+		}
+		allowed := true
+		dispatchAt := now.UnixMilli()
+		model := b.cfg.Models[e.Model]
+		for _, group := range model.QuotaGroups {
+			quota := b.cfg.QuotaGroups[group]
+			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO quota_state(group_name,credit,updated_at) VALUES(?,?,?)`,
+				group, quota.BurstRequests, now.UnixMilli()); err != nil {
+				return result, false, err
+			}
+			var credit float64
+			var updated, cooldown int64
+			if err := tx.QueryRowContext(ctx, `SELECT credit,updated_at,cooldown_until FROM quota_state WHERE group_name=?`, group).
+				Scan(&credit, &updated, &cooldown); err != nil {
+				return result, false, err
+			}
+			effective := max(now.UnixMilli(), updated)
+			dispatchAt = max(dispatchAt, effective)
+			credit = math.Min(float64(quota.BurstRequests), credit+float64(effective-updated)*float64(quota.RequestsPerMinute)/60000)
+			if _, err := tx.ExecContext(ctx, `UPDATE quota_state SET credit=?,updated_at=? WHERE group_name=?`, credit, effective, group); err != nil {
+				return result, false, err
+			}
+			var tokens, inflight int64
+			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(CASE WHEN a.dispatched_at>? THEN a.reservation ELSE 0 END),0),
+			 COALESCE(SUM(CASE WHEN a.state='running' THEN 1 ELSE 0 END),0)
+			 FROM model_attempts a JOIN call_groups g USING(call_id) WHERE g.group_name=?`,
+				effective-60000, group).Scan(&tokens, &inflight); err != nil {
+				return result, false, err
+			}
+			if credit < 1 || cooldown > now.UnixMilli() || tokens+e.Reservation > quota.TokensPerMinute || inflight >= quota.MaxConcurrent {
+				allowed = false
+			}
+		}
+		if !allowed {
+			if _, err := tx.ExecContext(ctx, `UPDATE model_calls SET reason='waiting for shared rate, cooldown, or concurrency capacity' WHERE call_id=?`, e.CallID); err != nil {
+				return result, false, err
+			}
+			continue
+		}
+		// A later caller cannot leapfrog an earlier eligible system, even if
+		// its goroutine wins the mutex. Wakeups never themselves grant capacity.
+		if e.CallID != session.CallID {
+			break
+		}
+		if err := admitLearningUses(ctx, tx, e, now); err != nil {
+			if !DeniedTask(err) {
+				return result, false, err
+			}
+			if err := terminalCall(ctx, tx, e, "rejected", err.Error()); err != nil {
+				return result, false, err
+			}
+			continue
+		}
+		for _, group := range model.QuotaGroups {
+			if _, err := tx.ExecContext(ctx, `UPDATE quota_state SET credit=credit-1 WHERE group_name=?`, group); err != nil {
+				return result, false, err
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE systems SET reserved_tokens=reserved_tokens+? WHERE system_id=?`, e.Reservation, e.SystemID); err != nil {
+			return result, false, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE goals SET reserved_tokens=reserved_tokens+?,state='running' WHERE system_id=? AND goal_id=?`,
+			e.Reservation, e.SystemID, e.GoalID); err != nil {
+			return result, false, err
+		}
+		if err := chargeAgents(ctx, tx, e, e.Reservation, 0); err != nil {
+			return result, false, err
+		}
+		insert, err := tx.ExecContext(ctx, `INSERT INTO model_attempts(call_id,system_id,dispatched_at,reservation,state) VALUES(?,?,?,?,'running')`,
+			e.CallID, e.SystemID, dispatchAt, e.Reservation)
+		if err != nil {
+			return result, false, err
+		}
+		seq, err := insert.LastInsertId()
+		if err != nil {
+			return result, false, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE systems SET last_admission=? WHERE system_id=?`, seq, e.SystemID); err != nil {
+			return result, false, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE model_calls SET state='running',reason='',usage_known=0,attempts=attempts+1,
+		 dispatched_at=?,queue_wait_ms=queue_wait_ms+? WHERE call_id=?`,
+			dispatchAt, max(now.UnixMilli()-e.QueuedAt, 0), e.CallID); err != nil {
+			return result, false, err
+		}
+		if err := auditExecution(ctx, tx, e.SystemID, e.ActivationID, "model.dispatch", e.Revision, now); err != nil {
+			return result, false, err
+		}
+		admitted = true
+		break
+	}
+	result, err = readExecution(ctx, tx, session.SystemID, session.CallID)
+	if err != nil {
+		return result, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return result, false, err
+	}
+	return result, admitted, nil
+}
+
+func (b *admission) settle(ctx context.Context, session ExecutionRecord, p ProviderResult, now time.Time) (err error) {
+	tx, err := b.store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer rollback(tx, &err)
+	e, err := authorizeCall(ctx, tx, session)
+	if err != nil {
+		return err
+	}
+	if e.State != "running" {
+		return nil
+	}
+	state := "unknown"
+	if p.Known {
+		state = "completed"
+		if p.Reason != "" {
+			state = "failed"
+		}
+		actual := p.Input + p.Output
+		if err := chargeAgents(ctx, tx, e, -e.Reservation, actual); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE systems SET reserved_tokens=reserved_tokens-?,used_tokens=used_tokens+? WHERE system_id=?`,
+			e.Reservation, actual, e.SystemID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE goals SET reserved_tokens=reserved_tokens-?,used_tokens=used_tokens+? WHERE system_id=? AND goal_id=?`,
+			e.Reservation, actual, e.SystemID, e.GoalID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE model_attempts SET state='known',input_tokens=?,output_tokens=?,reservation=MAX(reservation,?),throttled=?
+		 WHERE call_id=? AND state='running'`, p.Input, p.Output, actual, p.Retry, e.CallID); err != nil {
+			return err
+		}
+	} else {
+		if _, err := tx.ExecContext(ctx, `UPDATE model_attempts SET state='unknown' WHERE call_id=? AND state='running'`, e.CallID); err != nil {
+			return err
+		}
+	}
+	if p.Retry {
+		cooldown := p.Cooldown
+		if cooldown.IsZero() {
+			cooldown = now.Add(p.RetryDelay)
+		}
+		wait := int64(3600)
+		queueAvailable := true
+		for _, group := range b.cfg.Models[e.Model].QuotaGroups {
+			wait = min(wait, b.cfg.QuotaGroups[group].MaxWaitSeconds)
+			if _, err := tx.ExecContext(ctx, `UPDATE quota_state SET cooldown_until=MAX(cooldown_until,?) WHERE group_name=?`, cooldown.UnixMilli(), group); err != nil {
+				return err
+			}
+			var queued int64
+			if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM model_calls c JOIN call_groups g USING(call_id)
+			 WHERE g.group_name=? AND c.state IN ('awaiting_worker','queued')`, group).Scan(&queued); err != nil {
+				return err
+			}
+			if queued >= b.cfg.QuotaGroups[group].QueueCapacity {
+				queueAvailable = false
+			}
+		}
+		var systemState string
+		if err := tx.QueryRowContext(ctx, `SELECT state FROM systems WHERE system_id=?`, e.SystemID).Scan(&systemState); err != nil {
+			return err
+		}
+		if !queueAvailable {
+			p.Reason = "provider throttled request; retry queue capacity exhausted"
+		}
+		if e.Attempts < 3 && now.UnixMilli() < e.Deadline && systemState == "running" && queueAvailable {
+			state = "queued"
+			if _, err := tx.ExecContext(ctx, `UPDATE model_calls SET wait_deadline=?,queued_at=? WHERE call_id=?`,
+				min(e.Deadline, now.Add(time.Duration(wait)*time.Second).UnixMilli()), now.UnixMilli(), e.CallID); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE goals SET state='waiting' WHERE system_id=? AND goal_id=?`, e.SystemID, e.GoalID); err != nil {
+				return err
+			}
+		}
+	}
+	actions, err := json.Marshal(p.Actions)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE model_calls SET state=?,reason=?,response=?,input_tokens=input_tokens+?,
+	 output_tokens=output_tokens+?,usage_known=?,actions=? WHERE call_id=?`,
+		state, p.Reason, p.Text, p.Input, p.Output, p.Known, actions, e.CallID); err != nil {
+		return err
+	}
+	if err := auditExecution(ctx, tx, e.SystemID, e.ActivationID, "model."+state, e.Revision, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+type QuotaView struct {
+	Group              string      `json:"group"`
+	RequestCredit      float64     `json:"request_credit"`
+	CooldownUntil      int64       `json:"cooldown_until_ms"`
+	ReservedRateTokens int64       `json:"reserved_rate_tokens"`
+	InFlight           int64       `json:"in_flight"`
+	Queued             int64       `json:"queued"`
+	Limits             QuotaConfig `json:"limits"`
+	Attempts           int64       `json:"dispatched_attempts"`
+	Throttles          int64       `json:"throttles"`
+}
+
+func (b *admission) quotas(ctx context.Context) (views []QuotaView, err error) {
+	tx, err := b.store.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer rollback(tx, &err)
+	views = make([]QuotaView, 0, len(b.cfg.QuotaGroups))
+	for name, quota := range b.cfg.QuotaGroups {
+		v := QuotaView{Group: name, Limits: quota, RequestCredit: float64(quota.BurstRequests)}
+		var updated int64
+		err := tx.QueryRowContext(ctx, `SELECT credit,updated_at,cooldown_until FROM quota_state WHERE group_name=?`, name).Scan(&v.RequestCredit, &updated, &v.CooldownUntil)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+		now := max(b.now().UnixMilli(), updated)
+		if err == nil {
+			v.RequestCredit = math.Min(float64(quota.BurstRequests), v.RequestCredit+float64(now-updated)*float64(quota.RequestsPerMinute)/60000)
+		}
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(CASE WHEN dispatched_at>? THEN reservation ELSE 0 END),0),
+		 COALESCE(SUM(CASE WHEN a.state='running' THEN 1 ELSE 0 END),0),count(*),COALESCE(SUM(a.throttled),0)
+		 FROM model_attempts a JOIN call_groups g USING(call_id) WHERE group_name=?`,
+			now-60000, name).Scan(&v.ReservedRateTokens, &v.InFlight, &v.Attempts, &v.Throttles); err != nil {
+			return nil, err
+		}
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM model_calls c JOIN call_groups g USING(call_id)
+		 WHERE group_name=? AND state IN ('awaiting_worker','queued')`, name).Scan(&v.Queued); err != nil {
+			return nil, err
+		}
+		views = append(views, v)
+	}
+	return views, nil
+}

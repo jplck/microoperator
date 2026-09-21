@@ -111,7 +111,7 @@ func newExecutionEngine(ctx context.Context, store *stateStore, cfg configuratio
 	broker.lookup = os.LookupEnv
 	engine := &executionEngine{active: make(map[string]activation), ctx: child, cancel: cancel, owner: owner,
 		executable: executable, store: store, cfg: cfg, broker: broker, logger: logger, wake: make(chan struct{}, 1), schedulerDone: make(chan struct{})}
-	if err := store.recoverExecutions(ctx); err != nil {
+	if err := store.RecoverExecutions(ctx); err != nil {
 		cancel()
 		return nil, err
 	}
@@ -142,7 +142,7 @@ func (engine *executionEngine) start(ctx context.Context, principal, key, id str
 	if !engine.broker.available() {
 		return systemRecord{}, errBrokerUnavailable
 	}
-	record, err := engine.store.startSystem(ctx, principal, key, id, engine.owner, command, engine.cfg, time.Now())
+	record, err := engine.store.StartSystem(ctx, principal, key, id, engine.owner, command, engine.cfg, time.Now())
 	if err != nil {
 		return record, err
 	}
@@ -153,7 +153,7 @@ func (engine *executionEngine) start(ctx context.Context, principal, key, id str
 func (engine *executionEngine) stop(ctx context.Context, principal, key, id string) (systemRecord, error) {
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
-	record, err := engine.store.stopSystem(ctx, principal, key, id, time.Now())
+	record, err := engine.store.StopSystem(ctx, principal, key, id, time.Now())
 	var field *fieldError
 	// A storage failure must not make emergency cancellation unavailable.
 	if err == nil || (!errors.Is(err, errSystemNotFound) && !errors.Is(err, errCommandConflict) && !errors.As(err, &field)) {

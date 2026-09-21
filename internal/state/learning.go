@@ -1,6 +1,4 @@
-//go:build darwin || linux
-
-package main
+package state
 
 import (
 	"context"
@@ -14,12 +12,12 @@ import (
 	"time"
 )
 
-type protectedCase struct {
+type ProtectedCase struct {
 	Input    string `json:"input"`
 	Expected string `json:"expected"`
 }
 
-type learningEvidence struct {
+type LearningEvidence struct {
 	Input           string `json:"input"`
 	Expected        string `json:"expected"`
 	Baseline        string `json:"baseline"`
@@ -28,23 +26,23 @@ type learningEvidence struct {
 	CandidatePassed bool   `json:"candidate_passed"`
 }
 
-func (cfg configuration) withLocalTools(tools map[string]toolConfig) configuration {
+func (cfg Configuration) WithLocalTools(tools map[string]ToolConfig) Configuration {
 	if len(tools) == 0 {
 		return cfg
 	}
-	copyTools := make(map[string]toolConfig, len(cfg.Tools)+len(tools))
-	for name, tool := range cfg.Tools {
-		copyTools[name] = tool
+	copyTools := make(map[string]ToolConfig, len(cfg.Tools)+len(tools))
+	for name, Tool := range cfg.Tools {
+		copyTools[name] = Tool
 	}
-	for name, tool := range tools {
-		copyTools[name] = tool
+	for name, Tool := range tools {
+		copyTools[name] = Tool
 	}
 	cfg.Tools = copyTools
 	return cfg
 }
 
-func loadLocalTools(ctx context.Context, tx *sql.Tx, systemID string, pins []toolPin) (map[string]toolConfig, error) {
-	var tools map[string]toolConfig
+func loadLocalTools(ctx context.Context, tx *sql.Tx, systemID string, pins []ToolPin) (map[string]ToolConfig, error) {
+	var tools map[string]ToolConfig
 	for _, pin := range pins {
 		if !strings.HasPrefix(pin.Name, "local.") {
 			continue
@@ -53,34 +51,34 @@ func loadLocalTools(ctx context.Context, tx *sql.Tx, systemID string, pins []too
 		var digest string
 		err := tx.QueryRowContext(ctx, `SELECT definition,digest FROM learning_approvals WHERE system_id=? AND tool_id=? AND version=?`, systemID, pin.Name, pin.Version).Scan(&definition, &digest)
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, invalid("tool", "local revision is not approved in this system")
+			return nil, Invalid("tool", "local revision is not approved in this system")
 		}
 		if err != nil {
 			return nil, err
 		}
 		if digest != pin.Digest {
-			return nil, invalid("tool", "local definition digest does not match its exact pin")
+			return nil, Invalid("tool", "local definition digest does not match its exact pin")
 		}
-		var tool toolConfig
-		if err := decodeJSON(definition, &tool); err != nil {
+		var Tool ToolConfig
+		if err := DecodeJSON(definition, &Tool); err != nil {
 			return nil, err
 		}
-		actual, _, err := jsonDigest(tool)
+		actual, _, err := JsonDigest(Tool)
 		if err != nil {
 			return nil, err
 		}
-		if actual != digest || tool.Version != pin.Version {
+		if actual != digest || Tool.Version != pin.Version {
 			return nil, errors.New("stored approved definition is inconsistent")
 		}
 		if tools == nil {
-			tools = make(map[string]toolConfig)
+			tools = make(map[string]ToolConfig)
 		}
-		tools[pin.Name] = tool
+		tools[pin.Name] = Tool
 	}
 	return tools, nil
 }
 
-func authorizeLocalPin(ctx context.Context, tx *sql.Tx, systemID string, pin toolPin, now time.Time) error {
+func authorizeLocalPin(ctx context.Context, tx *sql.Tx, systemID string, pin ToolPin, now time.Time) error {
 	var state, draftState string
 	var expires int64
 	err := tx.QueryRowContext(ctx, `SELECT e.state,d.state,a.expires_at FROM learning_approvals a
@@ -88,20 +86,20 @@ func authorizeLocalPin(ctx context.Context, tx *sql.Tx, systemID string, pin too
 	 JOIN tool_drafts d ON d.system_id=a.system_id AND d.tool_id=a.tool_id AND d.version=a.version
 	 WHERE a.system_id=? AND a.tool_id=? AND a.version=? AND a.digest=?`, systemID, pin.Name, pin.Version, pin.Digest).Scan(&state, &draftState, &expires)
 	if errors.Is(err, sql.ErrNoRows) {
-		return invalid("tool", "no exact local approval")
+		return Invalid("tool", "no exact local approval")
 	}
 	if err != nil {
 		return err
 	}
 	if state != "active" || draftState != "draft" || now.UnixMilli() >= expires {
-		return invalid("tool", "local approval expired, was rejected, or was disabled")
+		return Invalid("tool", "local approval expired, was rejected, or was disabled")
 	}
 	return nil
 }
 
 // An approval admits a bounded number of distinct tasks. The first model
 // dispatch consumes a use atomically; retries and continuations cannot reset it.
-func admitLearningUses(ctx context.Context, tx *sql.Tx, e executionRecord, now time.Time) error {
+func admitLearningUses(ctx context.Context, tx *sql.Tx, e ExecutionRecord, now time.Time) error {
 	t, err := readTask(ctx, tx, e.SystemID, e.TaskID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
@@ -109,7 +107,7 @@ func admitLearningUses(ctx context.Context, tx *sql.Tx, e executionRecord, now t
 	if err != nil {
 		return err
 	}
-	var pending []toolPin
+	var pending []ToolPin
 	for _, pin := range t.Tools {
 		if !strings.HasPrefix(pin.Name, "local.") {
 			continue
@@ -129,7 +127,7 @@ func admitLearningUses(ctx context.Context, tx *sql.Tx, e executionRecord, now t
 			return err
 		}
 		if remaining == 0 {
-			return invalid("approval", "task-use limit exhausted")
+			return Invalid("approval", "task-use limit exhausted")
 		}
 		pending = append(pending, pin)
 	}
@@ -152,19 +150,19 @@ func admitLearningUses(ctx context.Context, tx *sql.Tx, e executionRecord, now t
 	return nil
 }
 
-func generatedArtifactPath(dataDir, systemID, digest string) (string, error) {
-	if !systemIDPattern.MatchString(systemID) || len(digest) != 64 || strings.Trim(digest, "0123456789abcdef") != "" {
-		return "", invalid("artifact", "invalid generated artifact identity")
+func GeneratedArtifactPath(dataDir, systemID, digest string) (string, error) {
+	if !SystemIDPattern.MatchString(systemID) || len(digest) != 64 || strings.Trim(digest, "0123456789abcdef") != "" {
+		return "", Invalid("artifact", "invalid generated artifact identity")
 	}
 	return filepath.Join(dataDir, "generated", systemID, digest), nil
 }
 
-func saveGeneratedArtifact(dataDir, systemID string, binary []byte) (string, error) {
-	if len(binary) == 0 || len(binary) > maxGeneratedBinary {
-		return "", invalid("artifact", "binary exceeds bound")
+func SaveGeneratedArtifact(dataDir, systemID string, binary []byte) (string, error) {
+	if len(binary) == 0 || len(binary) > MaxGeneratedBinary {
+		return "", Invalid("artifact", "binary exceeds bound")
 	}
-	digest := artifactDigest(binary)
-	path, err := generatedArtifactPath(dataDir, systemID, digest)
+	digest := ArtifactDigest(binary)
+	path, err := GeneratedArtifactPath(dataDir, systemID, digest)
 	if err != nil {
 		return "", err
 	}
@@ -180,9 +178,9 @@ func saveGeneratedArtifact(dataDir, systemID string, binary []byte) (string, err
 			return "", errors.New("generated artifact directory is not private")
 		}
 	}
-	file, err := openOwnedFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, true)
+	file, err := OpenOwnedFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, true)
 	if errors.Is(err, os.ErrExist) {
-		data, readErr := readGeneratedArtifact(dataDir, systemID, digest)
+		data, readErr := ReadGeneratedArtifact(dataDir, systemID, digest)
 		if readErr != nil {
 			return "", readErr
 		}
@@ -207,61 +205,61 @@ func saveGeneratedArtifact(dataDir, systemID string, binary []byte) (string, err
 	return digest, err
 }
 
-func readGeneratedArtifact(dataDir, systemID, digest string) ([]byte, error) {
-	path, err := generatedArtifactPath(dataDir, systemID, digest)
+func ReadGeneratedArtifact(dataDir, systemID, digest string) ([]byte, error) {
+	path, err := GeneratedArtifactPath(dataDir, systemID, digest)
 	if err != nil {
 		return nil, err
 	}
-	file, err := openOwnedFile(path, os.O_RDONLY, true)
+	file, err := OpenOwnedFile(path, os.O_RDONLY, true)
 	if err != nil {
 		return nil, err
 	}
-	data, err := io.ReadAll(io.LimitReader(file, maxGeneratedBinary+1))
+	data, err := io.ReadAll(io.LimitReader(file, MaxGeneratedBinary+1))
 	err = errors.Join(err, file.Close())
 	if err != nil {
 		return nil, err
 	}
-	if len(data) == 0 || len(data) > maxGeneratedBinary || artifactDigest(data) != digest {
-		return nil, invalid("artifact", "approved binary changed or exceeds size bound")
+	if len(data) == 0 || len(data) > MaxGeneratedBinary || ArtifactDigest(data) != digest {
+		return nil, Invalid("artifact", "approved binary changed or exceeds size bound")
 	}
 	return data, nil
 }
 
-func protectedCases(data []byte) ([]protectedCase, error) {
-	var cases []protectedCase
-	if err := decodeJSON(data, &cases); err != nil {
+func ProtectedCases(data []byte) ([]ProtectedCase, error) {
+	var cases []ProtectedCase
+	if err := DecodeJSON(data, &cases); err != nil {
 		return nil, err
 	}
 	if len(cases) < 1 || len(cases) > 2 {
-		return nil, invalid("checks", "requires one or two protected cases")
+		return nil, Invalid("checks", "requires one or two protected cases")
 	}
 	for _, check := range cases {
 		if strings.TrimSpace(check.Input) == "" || len(check.Input) > 1024 || len(check.Expected) > 4096 {
-			return nil, invalid("checks", "input or expected output exceeds limit")
+			return nil, Invalid("checks", "input or expected output exceeds limit")
 		}
 	}
 	return cases, nil
 }
 
-func candidateDefinition(draft draftCommand, version int64, binary, profile string) toolConfig {
-	return toolConfig{Kind: draft.Kind, Version: version, Description: draft.Description, Content: draft.Content, RequiresTools: draft.Requires,
+func CandidateDefinition(draft DraftCommand, version int64, binary, profile string) ToolConfig {
+	return ToolConfig{Kind: draft.Kind, Version: version, Description: draft.Description, Content: draft.Content, RequiresTools: draft.Requires,
 		BinaryDigest: binary, ProfileDigest: profile}
 }
 
-func readLearningDraft(ctx context.Context, tx *sql.Tx, systemID, id string, version int64) (draftCommand, error) {
-	var draft draftCommand
+func readLearningDraft(ctx context.Context, tx *sql.Tx, systemID, id string, version int64) (DraftCommand, error) {
+	var draft DraftCommand
 	var requires []byte
 	var state string
 	err := tx.QueryRowContext(ctx, `SELECT kind,description,content,requires_tools,state FROM tool_drafts WHERE system_id=? AND tool_id=? AND version=?`, systemID, id, version).
 		Scan(&draft.Kind, &draft.Description, &draft.Content, &requires, &state)
 	if errors.Is(err, sql.ErrNoRows) {
-		return draft, errSystemNotFound
+		return draft, ErrSystemNotFound
 	}
 	if err != nil {
 		return draft, err
 	}
 	if state != "draft" {
-		return draft, invalid("draft", "candidate is rejected or disabled")
+		return draft, Invalid("draft", "candidate is rejected or disabled")
 	}
 	err = json.Unmarshal(requires, &draft.Requires)
 	return draft, err

@@ -27,6 +27,16 @@ autonomous deployment. Do not start the deferred native upgrade as part of ordin
 feature work. Diagnostic fixtures must not become a production bypass for failed
 profile checks or an unsandboxed fallback.
 
+**Persistence refactor:** Complete. [`internal/state`](internal/state) owns all
+production SQL, migrations, scoped artifacts, and typed durable workflows.
+Runtime/API/network/process code stays outside that package. Commands, admission,
+settlement, mailbox claims, timers, recovery, and learning retain their atomic
+boundaries; external effects use typed preparation/completion. SQLite schema 5 and
+JSON schema 1 are unchanged. Component checks, integration-tagged vet, and the full
+race-enabled real-process suite passed on Linux/amd64 WSL2. Boundary and JSON
+compatibility checks guard the extraction; macOS was not rerun. Other databases
+remain future implementations, not an added adapter or generic repository layer.
+
 ## 0. Worker-launch foundation
 
 The phase-0 demo command and placeholder worker have been removed. Retained
@@ -80,7 +90,8 @@ merely because a configuration is declared.
 
 **Implemented scope and evidence**
 
-[config.go](config.go), [store.go](store.go), and [daemon.go](daemon.go) implement
+[config.go](config.go), [internal/state/store.go](internal/state/store.go), and
+[daemon.go](daemon.go) implement
 strict JSON loading, private SQLite state with explicit migrations, immutable
 configuration/revision/grant snapshots, pending initial goals, audit records,
 durable command receipts, and an authenticated Unix-socket control API.
@@ -125,11 +136,13 @@ with correlated private-pipe IPC and a durable goal/task/call identity.
 [provider.go](provider.go) implements bounded Chat Completions and SSE consumption;
 credentials stay in the daemon, redirects/proxies are disabled, and model text is
 never interpreted as code or a tool call.
-[broker.go](broker.go) shares durable quota groups across aliases, rotates admission
-across systems, and atomically reserves goal/system allowances. Request buckets,
+[broker.go](broker.go) performs provider calls through the durable admission and
+settlement operations in [internal/state/broker.go](internal/state/broker.go).
+These share quota groups across aliases, rotate admission across systems, and
+atomically reserve goal/system allowances. Request buckets,
 rolling token windows, concurrency, queue limits, cooldowns, explicit 429 retries,
 usage uncertainty, and storage-failure denial are enforced.
-[execution_store.go](execution_store.go) migrates existing state, retains call
+[internal/state/execution_store.go](internal/state/execution_store.go) migrates existing state, retains call
 history/receipts, and rejects unrecoverable work visibly rather than replaying
 ambiguous effects. Only authenticated starts launch work; stop remains system-scoped.
 
@@ -165,8 +178,9 @@ Registry presence alone never authorizes execution.
 
 **Implemented scope and evidence**
 
-[registry.go](registry.go), [runtime_api.go](runtime_api.go), and
-[team_ops.go](team_ops.go) supply one scoped catalog, pinned function schemas and
+[internal/state/registry.go](internal/state/registry.go),
+[internal/state/tools.go](internal/state/tools.go), and
+[runtime_api.go](runtime_api.go) supply one scoped catalog, pinned function schemas and
 skill context, immutable private drafts/provenance, explicit assignments, revocation,
 and receipts. `runtime.text.analyze` is fixed reviewed Go code, not a demo worker
 or an interpreter for proposed source. Its real subprocess uses the selected
@@ -204,9 +218,10 @@ All agent communication stays on the event/mailbox path.
 
 **Implemented scope and evidence**
 
-[team_store.go](team_store.go) migrates SQLite to schema 3, preserving prior
-receipts, calls, attempts, and reservations. [team.go](team.go) claims durable
-mailboxes through one scheduler; [team_ops.go](team_ops.go) commits proposals,
+[internal/state/team_store.go](internal/state/team_store.go) migrates SQLite to schema 3, preserving prior
+receipts, calls, attempts, and reservations. [team.go](team.go) schedules activations
+using durable claims in [internal/state/team.go](internal/state/team.go);
+[internal/state/team_ops.go](internal/state/team_ops.go) commits proposals,
 delegation/continuations, tool receipts, and terminal replies transactionally.
 [controls.go](controls.go) and [runtime_api.go](runtime_api.go) provide scoped
 pause/resume/stop, attributed input, and bounded team/task/event/artifact inspection.

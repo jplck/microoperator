@@ -117,14 +117,14 @@ func prepareResourceProcess(cmd *exec.Cmd, profile sandboxConfig) (func() error,
 	if profile.Resources == nil {
 		return func() error { return nil }, nil
 	}
-	if profile.resourceRoot == "" {
+	if profile.ResourceRoot == "" {
 		return nil, errors.New("resource profile has no delegated cgroup root")
 	}
 	id, err := newID("worker_" + strconv.Itoa(os.Getpid()) + "_")
 	if err != nil {
 		return nil, err
 	}
-	group := filepath.Join(profile.resourceRoot, id)
+	group := filepath.Join(profile.ResourceRoot, id)
 	if err := os.Mkdir(group, 0700); err != nil {
 		return nil, err
 	}

@@ -17,7 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
+
 	"sort"
 	"strconv"
 	"strings"
@@ -31,33 +31,6 @@ const controlTokenEnv = "MICROOPERATOR_CONTROL_TOKEN"
 
 func validAPIToken(token string) bool {
 	return len(token) >= 32 && len(token) <= 256 && strings.IndexFunc(token, func(r rune) bool { return r < 33 || r > 126 }) < 0
-}
-
-var (
-	systemIDPattern   = regexp.MustCompile(`^sys_[a-f0-9]{32}$`)
-	commandKeyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
-)
-
-// openOwnedFile refuses symlinks, foreign ownership, and writable-by-others
-// files. State files must additionally be private. Checking the opened inode
-// avoids trusting a separate stat of a potentially replaced final path.
-func openOwnedFile(filename string, flags int, private bool) (*os.File, error) {
-	// Nonblocking open lets us reject FIFOs instead of hanging before fstat.
-	// It does not change regular-file reads or writes.
-	file, err := os.OpenFile(filename, flags|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0600)
-	if err != nil {
-		return nil, err
-	}
-	info, err := file.Stat()
-	if err != nil {
-		return nil, errors.Join(err, file.Close())
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.Mode().IsRegular() || stat.Uid != uint32(os.Geteuid()) ||
-		info.Mode().Perm()&0022 != 0 || (private && info.Mode().Perm()&0077 != 0) {
-		return nil, errors.Join(errors.New("file must be regular, owned by this user, and have safe permissions"), file.Close())
-	}
-	return file, nil
 }
 
 func lockStateDirectory(directory string) (*os.File, error) {
@@ -135,10 +108,10 @@ func runDaemon(ctx context.Context, configPath string, stdout, stderr io.Writer)
 		return err
 	}
 	defer func() { err = errors.Join(err, lock.Close()) }()
-	if err := cfg.prepareResources(); err != nil {
+	if err := prepareResources(&cfg); err != nil {
 		return err
 	}
-	if err := cfg.prepareLearning(ctx); err != nil {
+	if err := prepareLearning(cfg, ctx); err != nil {
 		return err
 	}
 	if err := cleanupWorkspaces(cfg.DataDir); err != nil {
@@ -148,8 +121,8 @@ func runDaemon(ctx context.Context, configPath string, stdout, stderr io.Writer)
 	if err != nil {
 		return err
 	}
-	defer func() { err = errors.Join(err, store.db.Close()) }()
-	configID, err := store.rememberConfiguration(ctx, cfg)
+	defer func() { err = errors.Join(err, store.Close()) }()
+	configID, err := store.RememberConfiguration(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -404,7 +377,7 @@ func (api *controlAPI) calls(w http.ResponseWriter, r *http.Request) {
 		api.failure(w, invalid("after", "invalid model-call cursor"))
 		return
 	}
-	calls, next, err := api.store.listCalls(r.Context(), localAdministrator, id, after)
+	calls, next, err := api.store.ListCalls(r.Context(), localAdministrator, id, after)
 	if err != nil {
 		api.failure(w, err)
 		return
@@ -453,7 +426,7 @@ func (api *controlAPI) create(w http.ResponseWriter, r *http.Request) {
 		api.failure(w, err)
 		return
 	}
-	record, err := api.store.createSystem(r.Context(), localAdministrator, key, command, api.cfg, api.configID)
+	record, err := api.store.CreateSystem(r.Context(), localAdministrator, key, command, api.cfg, api.configID)
 	api.systemResponse(w, http.StatusCreated, record, err)
 }
 
@@ -471,7 +444,7 @@ func (api *controlAPI) revise(w http.ResponseWriter, r *http.Request) {
 		api.failure(w, err)
 		return
 	}
-	record, err := api.store.reviseSystem(r.Context(), localAdministrator, key, id, command, api.cfg, api.configID)
+	record, err := api.store.ReviseSystem(r.Context(), localAdministrator, key, id, command, api.cfg, api.configID)
 	api.systemResponse(w, http.StatusOK, record, err)
 }
 
@@ -481,13 +454,13 @@ func (api *controlAPI) get(w http.ResponseWriter, r *http.Request) {
 		api.failure(w, errSystemNotFound)
 		return
 	}
-	record, err := api.store.getSystem(r.Context(), localAdministrator, id)
+	record, err := api.store.GetSystem(r.Context(), localAdministrator, id)
 	api.systemResponse(w, http.StatusOK, record, err)
 }
 
 func (api *controlAPI) systemResponse(w http.ResponseWriter, status int, record systemRecord, err error) {
 	if err == nil {
-		record, err = api.cfg.inspect(record)
+		record, err = api.cfg.Inspect(record)
 	}
 	if err != nil {
 		api.failure(w, err)
@@ -504,10 +477,10 @@ func (api *controlAPI) list(w http.ResponseWriter, r *http.Request) {
 		api.failure(w, invalid("after", "invalid pagination cursor"))
 		return
 	}
-	records, next, err := api.store.listSystems(r.Context(), localAdministrator, after)
+	records, next, err := api.store.ListSystems(r.Context(), localAdministrator, after)
 	if err == nil {
 		for i := range records {
-			records[i], err = api.cfg.inspect(records[i])
+			records[i], err = api.cfg.Inspect(records[i])
 			if err != nil {
 				break
 			}

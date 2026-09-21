@@ -12,35 +12,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"go/parser"
-	"go/token"
+
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
-	"strconv"
+
 	"strings"
 	"time"
 )
 
-const maxGeneratedBinary = 32 << 20
-
-type learningConfig struct {
-	ToolchainRoot   string `json:"toolchain_root"`
-	ToolchainDigest string `json:"toolchain_digest"`
-}
-
-func validateLearningConfig(cfg learningConfig) error {
-	digest, err := hex.DecodeString(cfg.ToolchainDigest)
-	if !filepath.IsAbs(cfg.ToolchainRoot) || filepath.Clean(cfg.ToolchainRoot) != cfg.ToolchainRoot || err != nil || len(digest) != sha256.Size {
-		return invalid("learning", "requires an absolute canonical toolchain_root and its SHA-256 tree digest")
-	}
-
-	return nil
-}
-
-func (cfg configuration) prepareLearning(ctx context.Context) error {
+func prepareLearning(cfg configuration, ctx context.Context) error {
 	if cfg.Learning == nil {
 		return nil
 	}
@@ -134,24 +116,6 @@ func buildEnvironment(root, toolchain string) []string {
 		"GOCACHE=" + filepath.Join(root, "scratch", "cache"), "GOPATH=" + filepath.Join(root, "scratch", "gopath")}
 }
 
-func validateGeneratedSource(source string) error {
-	if len(source) == 0 || len(source) > maxEventBytes {
-		return invalid("source", "requires 1-8192 bytes of Go source")
-	}
-	file, err := parser.ParseFile(token.NewFileSet(), "candidate.go", source, 0)
-	if err != nil || file.Name.Name != "main" {
-		return invalid("source", "requires syntactically valid package main")
-	}
-	for _, imported := range file.Imports {
-		path, err := strconv.Unquote(imported.Path.Value)
-		if err != nil || path == "C" || strings.Contains(path, ".") || strings.Contains(path, "\\") ||
-			strings.HasPrefix(path, "/") || strings.HasPrefix(path, "vendor/") || strings.HasPrefix(path, "internal/") {
-			return invalid("source", "only standard-library imports are supported")
-		}
-	}
-	return nil
-}
-
 const generatedRunner = `package main
 import("encoding/json";"fmt";"io";"os")
 func main(){
@@ -164,20 +128,6 @@ func main(){
  if err:=json.NewEncoder(os.Stdout).Encode(struct{Text string ` + "`json:\"text\"`" + `}{text});err!=nil{os.Exit(1)}
 }
 `
-
-func generatedProfile(profile sandboxConfig) error {
-	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" || profile.Resources == nil || profile.resourceRoot == "" {
-		return invalid("sandbox", "generated execution requires the qualified Linux/amd64 delegated resource profile")
-	}
-	if err := validateSandbox("sandbox", profile); err != nil {
-		return err
-	}
-	if len(profile.Read) != 1 || profile.Read[0] != "inputs" || len(profile.ReadWrite) != 2 ||
-		!((profile.ReadWrite[0] == "scratch" && profile.ReadWrite[1] == "output") || (profile.ReadWrite[1] == "scratch" && profile.ReadWrite[0] == "output")) {
-		return invalid("sandbox", "generated work requires only read-only inputs and bounded scratch/output")
-	}
-	return nil
-}
 
 func generatedWorkspace(dataDir, systemID string) (string, error) {
 	root, err := os.MkdirTemp(dataDir, "tool-"+systemID+"-")
@@ -242,7 +192,7 @@ func buildGenerated(ctx context.Context, launcher, dataDir, systemID, source str
 	if err := os.WriteFile(filepath.Join(root, "inputs", "runner.go"), []byte(generatedRunner), 0600); err != nil {
 		return nil, err
 	}
-	profile.toolchain = cfg.ToolchainRoot
+	profile.Toolchain = cfg.ToolchainRoot
 	err = superviseWorkspace(ctx, launcher, root, filepath.Join(cfg.ToolchainRoot, "bin", "go"),
 		[]string{"build", "-trimpath", "-buildvcs=false", "-p=2", "-o", "output/tool", "inputs/candidate.go", "inputs/runner.go"},
 		func(_ io.Writer, out io.Reader) error {

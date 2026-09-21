@@ -72,7 +72,7 @@ func TestExecutionControlValidationAndUnavailableAccounting(t *testing.T) {
 	broker.broken = true
 	engine := &executionEngine{ctx: context.Background(), store: store, cfg: cfg, broker: broker}
 	handler := newControlHandler(store, cfg, id, fixtureControlToken, log.New(io.Discard, "", 0), engine)
-	record, err := store.createSystem(context.Background(), localAdministrator, "create", createSystemCommand{Launch: "research"}, cfg, id)
+	record, err := store.CreateSystem(context.Background(), localAdministrator, "create", createSystemCommand{Launch: "research"}, cfg, id)
 	if err != nil {
 		t.Fatal(err)
 	}

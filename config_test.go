@@ -25,13 +25,13 @@ func fixtureConfiguration(t *testing.T) configuration {
 		SchemaVersion: 1,
 		DataDir:       filepath.Join(t.TempDir(), "state"),
 		Providers: map[string]providerConfig{
-			"primary": {"openai-chat-completions", "https://provider.example.invalid/v1", fixtureProviderEnv},
+			"primary": {Adapter: "openai-chat-completions", BaseURL: "https://provider.example.invalid/v1", APIKeyEnv: fixtureProviderEnv},
 		},
 		Models: map[string]modelConfig{
-			"default": {"primary", "fixture-model", []string{"account"}, 1024, 0},
+			"default": {Provider: "primary", Model: "fixture-model", QuotaGroups: []string{"account"}, MaxOutputTokens: 1024},
 		},
 		QuotaGroups: map[string]quotaConfig{
-			"account": {60, 60000, 1, 2, 100, 30},
+			"account": {RequestsPerMinute: 60, TokensPerMinute: 60000, BurstRequests: 1, MaxConcurrent: 2, QueueCapacity: 100, MaxWaitSeconds: 30},
 		},
 		SandboxProfiles: map[string]sandboxConfig{
 			"worker": {Read: []string{"inputs"}, ReadWrite: []string{"scratch", "output"}, Network: "blocked"},
@@ -42,8 +42,8 @@ func fixtureConfiguration(t *testing.T) configuration {
 		Systems: map[string]systemConfig{
 			"research": {
 				Tools:    []string{"shared.notes"},
-				Operator: operatorConfig{"Research $HOME literally.", "default", []string{"shared.notes"}, "worker"},
-				Limits:   systemLimits{4, 2, 50000},
+				Operator: operatorConfig{Prompt: "Research $HOME literally.", Model: "default", Tools: []string{"shared.notes"}, SandboxProfile: "worker"},
+				Limits:   systemLimits{MaxAgents: 4, MaxActiveAgents: 2, TokenBudget: 50000},
 			},
 		},
 	}
@@ -81,7 +81,7 @@ func TestReadmeConfiguration(t *testing.T) {
 	if err := decodeJSON([]byte(example), &cfg); err != nil {
 		t.Fatal(err)
 	}
-	if err := cfg.validate(func(name string) (string, bool) {
+	if err := cfg.Validate(func(name string) (string, bool) {
 		return fixtureProviderSecret, name == "MICROOPERATOR_LLM_KEY"
 	}); err != nil {
 		t.Fatalf("README configuration is not accepted: %v", err)
@@ -232,20 +232,20 @@ func TestConfigurationValidation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := fixtureConfiguration(t)
 			tc.change(&cfg)
-			err := cfg.validate(fixtureLookup)
+			err := cfg.Validate(fixtureLookup)
 			if err == nil || !strings.Contains(err.Error(), tc.field) || strings.Contains(err.Error(), fixtureProviderSecret) {
 				t.Fatalf("validation error = %v; want safe field error for %s", err, tc.field)
 			}
 		})
 	}
 	cfg := fixtureConfiguration(t)
-	if err := cfg.validate(fixtureLookup); err != nil {
+	if err := cfg.Validate(fixtureLookup); err != nil {
 		t.Fatal(err)
 	}
 	p := cfg.Providers["primary"]
 	p.BaseURL = "http://127.0.0.1:12345/v1"
 	cfg.Providers["primary"] = p
-	if err := cfg.validate(fixtureLookup); err != nil {
+	if err := cfg.Validate(fixtureLookup); err != nil {
 		t.Fatalf("loopback fixture provider rejected: %v", err)
 	}
 }

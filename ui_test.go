@@ -115,7 +115,7 @@ func TestUIAuthenticationCSRFAndDurableCommands(t *testing.T) {
 	}
 	assertCount(t, engine.store, "systems", 1)
 	var id string
-	if err := engine.store.db.QueryRow(`SELECT system_id FROM systems`).Scan(&id); err != nil {
+	if err := testDB(t, engine.store).QueryRow(`SELECT system_id FROM systems`).Scan(&id); err != nil {
 		t.Fatal(err)
 	}
 	for _, route := range []string{"/systems/" + id, "/systems/" + id + "/tools", "/systems/" + id + "/memory", "/systems/" + id + "/schedules", "/systems/" + id + "/learning", "/systems/" + id + "/learning-checks", "/systems/" + id + "/learning-feedback", "/broker", "/tools"} {
@@ -131,7 +131,7 @@ func TestUIAuthenticationCSRFAndDurableCommands(t *testing.T) {
 	if status, body := uiResponse(t, ui, "POST", "/command", pause, ""); status != 202 {
 		t.Fatalf("UI pause: %s", body)
 	}
-	record, err := engine.store.getSystem(context.Background(), localAdministrator, id)
+	record, err := engine.store.GetSystem(context.Background(), localAdministrator, id)
 	if err != nil || record.State != "paused" {
 		t.Fatalf("UI did not control daemon state: %+v %v", record, err)
 	}
@@ -155,7 +155,7 @@ func TestUIAuthenticationCSRFAndDurableCommands(t *testing.T) {
 func TestUITextAttachmentIsBoundedScopedAndIdempotent(t *testing.T) {
 	ui, engine := fixtureUI(t)
 	var configID string
-	if err := engine.store.db.QueryRow(`SELECT config_id FROM config_snapshots LIMIT 1`).Scan(&configID); err != nil {
+	if err := testDB(t, engine.store).QueryRow(`SELECT config_id FROM config_snapshots LIMIT 1`).Scan(&configID); err != nil {
 		t.Fatal(err)
 	}
 	e := knowledgeCall(t, engine, configID, "upload")
@@ -201,11 +201,11 @@ func TestUITextAttachmentIsBoundedScopedAndIdempotent(t *testing.T) {
 	}
 	assertCount(t, engine.store, "artifacts", 1)
 	var count int
-	if err := engine.store.db.QueryRow(`SELECT count(*) FROM events WHERE type='user.input'`).Scan(&count); err != nil || count != 1 {
+	if err := testDB(t, engine.store).QueryRow(`SELECT count(*) FROM events WHERE type='user.input'`).Scan(&count); err != nil || count != 1 {
 		t.Fatal("attachment input duplicated")
 	}
 	var content []byte
-	if err := engine.store.db.QueryRow(`SELECT content FROM artifacts`).Scan(&content); err != nil {
+	if err := testDB(t, engine.store).QueryRow(`SELECT content FROM artifacts`).Scan(&content); err != nil {
 		t.Fatal(err)
 	}
 	var attachment map[string]string

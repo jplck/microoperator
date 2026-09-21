@@ -10,7 +10,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"math/rand/v2"
+	rand "math/rand/v2"
+
 	"net"
 	"net/http"
 	"strconv"
@@ -18,87 +19,6 @@ import (
 	"time"
 	"unicode/utf8"
 )
-
-const (
-	providerTimeout  = 60 * time.Second
-	maxProviderBytes = 1 << 20
-	maxModelText     = 32768
-)
-
-type chatMessage struct {
-	Role       string          `json:"role"`
-	Content    string          `json:"content"`
-	ToolCalls  []modelToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string          `json:"tool_call_id,omitempty"`
-}
-
-func modelRequest(cfg configuration, record systemRecord, prompt string, stream bool) ([]byte, int64, error) {
-	return conversationRequest(cfg, record, []chatMessage{{Role: "user", Content: prompt}}, stream)
-}
-
-func conversationRequest(cfg configuration, record systemRecord, conversation []chatMessage, stream bool) ([]byte, int64, error) {
-	cfg = cfg.withLocalTools(record.localTools)
-	model, ok := cfg.Models[record.Grants.Model]
-	if !ok {
-		return nil, 0, invalid("model", "grant no longer exists")
-	}
-	messages := []chatMessage{{Role: "system", Content: record.Configuration.Operator.Prompt}}
-	var functions []modelFunction
-	for _, pin := range record.Grants.OperatorTools {
-		tool, ok := cfg.tool(pin.Name)
-		if !ok {
-			return nil, 0, invalid("tools", "pinned definition is unavailable")
-		}
-		if tool.Kind == "executable" {
-			function, err := executableSchema(pin.Name, tool)
-			if err != nil {
-				return nil, 0, err
-			}
-			functions = append(functions, function)
-			continue
-		}
-		messages = append(messages, chatMessage{Role: "system", Content: tool.Content})
-	}
-	if stream && len(functions) > 0 {
-		return nil, 0, invalid("stream", "streaming executable tool calls is not enabled; use non-streaming turns")
-	}
-	messages = append(messages, conversation...)
-	request := struct {
-		Model             string          `json:"model"`
-		Messages          []chatMessage   `json:"messages"`
-		MaxTokens         int64           `json:"max_tokens"`
-		Stream            bool            `json:"stream"`
-		Tools             []modelFunction `json:"tools,omitempty"`
-		ParallelToolCalls *bool           `json:"parallel_tool_calls,omitempty"`
-		StreamOptions     *struct {
-			IncludeUsage bool `json:"include_usage"`
-		} `json:"stream_options,omitempty"`
-	}{Model: model.Model, Messages: messages, MaxTokens: model.MaxOutputTokens, Stream: stream, Tools: functions}
-	if len(functions) > 0 {
-		disabled := false
-		request.ParallelToolCalls = &disabled
-	}
-	if stream {
-		request.StreamOptions = &struct {
-			IncludeUsage bool `json:"include_usage"`
-		}{true}
-	}
-	body, err := json.Marshal(request)
-	if err != nil {
-		return nil, 0, err
-	}
-	if len(body) > maxFrame {
-		return nil, 0, invalid("model.call", "encoded provider request exceeds 64 KiB")
-	}
-	headroom := model.InputHeadroomPercent
-	if headroom == 0 {
-		headroom = 20
-	}
-	// One token per serialized byte deliberately overestimates ordinary text.
-	// This is not a tokenizer or a price guarantee; unknown usage stays reserved.
-	input := (int64(len(body))*(100+headroom) + 99) / 100
-	return body, input + model.MaxOutputTokens, nil
-}
 
 func providerClient() *http.Client {
 	return &http.Client{
@@ -113,17 +33,6 @@ func providerClient() *http.Client {
 		// Never forward credentials to a redirect or bypass a configured gateway.
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
-}
-
-type providerResult struct {
-	Text          string
-	Input, Output int64
-	Known         bool
-	Reason        string
-	Retry         bool
-	Cooldown      time.Time
-	RetryDelay    time.Duration
-	Actions       []modelToolCall
 }
 
 type chatUsage struct {

@@ -1,6 +1,4 @@
-//go:build darwin || linux
-
-package main
+package state
 
 const schemaV5 = `
 ALTER TABLE tasks ADD COLUMN learning_id TEXT NOT NULL DEFAULT '';

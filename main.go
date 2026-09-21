@@ -94,7 +94,7 @@ func run(ctx context.Context, args []string) error {
 			if len(args) < 5 || profile.Resources == nil {
 				return errors.New("builder requires a resource profile and pinned toolchain")
 			}
-			profile.toolchain = args[4]
+			profile.Toolchain = args[4]
 			args = append(args[:4:4], args[5:]...)
 		}
 		return sandboxExec(args[1], args[2], args[4:], profile)
@@ -210,11 +210,11 @@ func sandboxExec(root, target string, args []string, profiles ...sandboxConfig) 
 	if err := caps.AllowFile(target, nono.AccessRead); err != nil {
 		return fmt.Errorf("grant executable: %w", err)
 	}
-	if profile.toolchain != "" {
-		if profile.Resources == nil || target != filepath.Join(profile.toolchain, "bin", "go") {
+	if profile.Toolchain != "" {
+		if profile.Resources == nil || target != filepath.Join(profile.Toolchain, "bin", "go") {
 			return errors.New("toolchain grant is restricted to the confined Go builder")
 		}
-		if err := caps.AllowPath(profile.toolchain, nono.AccessRead); err != nil {
+		if err := caps.AllowPath(profile.Toolchain, nono.AccessRead); err != nil {
 			return fmt.Errorf("grant pinned toolchain: %w", err)
 		}
 	}
@@ -272,8 +272,8 @@ func sandboxExec(root, target string, args []string, profiles ...sandboxConfig) 
 		return fmt.Errorf("apply nono sandbox: %w", err)
 	}
 	env := workerEnv(root)
-	if profile.toolchain != "" {
-		env = append(env, buildEnvironment(root, profile.toolchain)...)
+	if profile.Toolchain != "" {
+		env = append(env, buildEnvironment(root, profile.Toolchain)...)
 	}
 	if err := syscall.Exec(target, append([]string{target}, args...), env); err != nil {
 		return fmt.Errorf("exec confined worker: %w", err)
@@ -384,8 +384,8 @@ func superviseWorkspace(ctx context.Context, launcher, root, target string, args
 			return errors.New("sandbox profile exceeds launch limit")
 		}
 		commandArgs = append([]string{"sandbox-exec-profile", root, target, string(data)}, args...)
-		if profiles[0].toolchain != "" {
-			commandArgs = append([]string{"sandbox-build-profile", root, target, string(data), profiles[0].toolchain}, args...)
+		if profiles[0].Toolchain != "" {
+			commandArgs = append([]string{"sandbox-build-profile", root, target, string(data), profiles[0].Toolchain}, args...)
 		}
 	}
 	inRead, inWrite, err := os.Pipe()

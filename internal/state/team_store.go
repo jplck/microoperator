@@ -1,6 +1,4 @@
-//go:build darwin || linux
-
-package main
+package state
 
 import (
 	"context"
@@ -13,12 +11,12 @@ import (
 )
 
 const (
-	maxTaskTurns    = 8
-	maxGoalTasks    = 64
-	maxGoalEvents   = 256
-	maxSystemEvents = 4096
-	maxEventBytes   = 8192
-	maxEventDepth   = 16
+	MaxTaskTurns    = 8
+	MaxGoalTasks    = 64
+	MaxGoalEvents   = 256
+	MaxSystemEvents = 4096
+	MaxEventBytes   = 8192
+	MaxEventDepth   = 16
 )
 
 const schemaV3 = `
@@ -150,7 +148,7 @@ CREATE TABLE artifacts (
 PRAGMA user_version=3;
 `
 
-type taskRecord struct {
+type TaskRecord struct {
 	SystemID     string        `json:"system_id"`
 	ID           string        `json:"task_id"`
 	GoalID       string        `json:"goal_id"`
@@ -159,8 +157,8 @@ type taskRecord struct {
 	Parent       string        `json:"parent_task,omitempty"`
 	State        string        `json:"state"`
 	Control      string        `json:"control"`
-	Tools        []toolPin     `json:"tools"`
-	Conversation []chatMessage `json:"-"`
+	Tools        []ToolPin     `json:"tools"`
+	Conversation []ChatMessage `json:"-"`
 	Turns        int           `json:"turns"`
 	CallID       string        `json:"call_id"`
 	WaitingTool  string        `json:"waiting_tool,omitempty"`
@@ -170,7 +168,7 @@ type taskRecord struct {
 	LearningRole string        `json:"evaluation_role,omitempty"`
 }
 
-type agentRecord struct {
+type AgentRecord struct {
 	SystemID    string         `json:"system_id"`
 	ID          string         `json:"agent_id"`
 	Parent      string         `json:"parent_id,omitempty"`
@@ -181,12 +179,12 @@ type agentRecord struct {
 	Depth       int            `json:"depth"`
 	TokenBudget int64          `json:"token_budget"`
 	MaxTurns    int            `json:"max_turns"`
-	Definition  operatorConfig `json:"definition"`
-	Tools       []toolPin      `json:"tools"`
+	Definition  OperatorConfig `json:"definition"`
+	Tools       []ToolPin      `json:"tools"`
 	Available   bool           `json:"available"`
 }
 
-func readTask(ctx context.Context, tx *sql.Tx, systemID, id string) (t taskRecord, err error) {
+func readTask(ctx context.Context, tx *sql.Tx, systemID, id string) (t TaskRecord, err error) {
 	var tools, conversation []byte
 	err = tx.QueryRowContext(ctx, `SELECT system_id,task_id,goal_id,agent_id,agent_revision,parent_task,state,control,tools,conversation,turns,call_id,waiting_tool,response,reason,learning_id,learning_role
 	 FROM tasks WHERE system_id=? AND task_id=?`, systemID, id).Scan(&t.SystemID, &t.ID, &t.GoalID, &t.AgentID, &t.Revision, &t.Parent, &t.State, &t.Control, &tools, &conversation, &t.Turns, &t.CallID, &t.WaitingTool, &t.Response, &t.Reason, &t.LearningID, &t.LearningRole)
@@ -200,7 +198,7 @@ func readTask(ctx context.Context, tx *sql.Tx, systemID, id string) (t taskRecor
 	return
 }
 
-func readAgent(ctx context.Context, tx *sql.Tx, systemID, id string, revision int64) (a agentRecord, err error) {
+func readAgent(ctx context.Context, tx *sql.Tx, systemID, id string, revision int64) (a AgentRecord, err error) {
 	var definition, tools []byte
 	err = tx.QueryRowContext(ctx, `SELECT a.system_id,a.agent_id,a.parent_id,a.goal_id,a.name,r.revision,a.state,a.depth,a.token_budget,a.max_turns,r.definition,r.tools
 	 FROM agents a JOIN agent_revisions r ON r.system_id=a.system_id AND r.agent_id=a.agent_id AND r.revision=CASE WHEN ?=0 THEN a.revision ELSE ? END
@@ -220,7 +218,7 @@ func readAgent(ctx context.Context, tx *sql.Tx, systemID, id string, revision in
 	return
 }
 
-func insertAgentRevision(ctx context.Context, tx *sql.Tx, a agentRecord) error {
+func insertAgentRevision(ctx context.Context, tx *sql.Tx, a AgentRecord) error {
 	def, err := json.Marshal(a.Definition)
 	if err != nil {
 		return err
@@ -233,13 +231,13 @@ func insertAgentRevision(ctx context.Context, tx *sql.Tx, a agentRecord) error {
 	return err
 }
 
-func emitEvent(ctx context.Context, tx *sql.Tx, t taskRecord, kind, source, causation string, payload any, now time.Time) (string, error) {
+func emitEvent(ctx context.Context, tx *sql.Tx, t TaskRecord, kind, source, causation string, payload any, now time.Time) (string, error) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return "", err
 	}
-	if len(data) > maxEventBytes {
-		return "", invalid("event", "payload exceeds 8 KiB")
+	if len(data) > MaxEventBytes {
+		return "", Invalid("event", "payload exceeds 8 KiB")
 	}
 	depth := 0
 	if causation != "" {
@@ -263,11 +261,11 @@ func emitEvent(ctx context.Context, tx *sql.Tx, t taskRecord, kind, source, caus
 	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM events WHERE system_id=? AND source=? AND created_at>?`, t.SystemID, source, now.Add(-time.Minute).UnixMilli()).Scan(&sourceRate); err != nil {
 		return "", err
 	}
-	if total+reserved >= maxSystemEvents || goalCount+goalReserved >= maxGoalEvents || pending+recipientReserved >= 64 || depth > maxEventDepth ||
+	if total+reserved >= MaxSystemEvents || goalCount+goalReserved >= MaxGoalEvents || pending+recipientReserved >= 64 || depth > MaxEventDepth ||
 		(strings.HasPrefix(source, "agent_") && sourceRate >= 32) {
-		return "", invalid("events", "event budget, queue, or causation limit exhausted")
+		return "", Invalid("events", "event budget, queue, or causation limit exhausted")
 	}
-	id, err := newID("event_")
+	id, err := NewID("event_")
 	if err != nil {
 		return "", err
 	}
@@ -276,7 +274,7 @@ func emitEvent(ctx context.Context, tx *sql.Tx, t taskRecord, kind, source, caus
 		return "", err
 	}
 	if deadline <= now.UnixMilli() && kind != "task.result" {
-		return "", invalid("event", "goal lifetime has expired")
+		return "", Invalid("event", "goal lifetime has expired")
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO events(event_id,system_id,type,source,recipient,goal_id,task_id,correlation_id,causation_id,created_at,expires_at,authorization_ref,depth,payload)
 	 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, t.SystemID, kind, source, t.AgentID, t.GoalID, t.ID, t.ID, causation, now.UnixMilli(), deadline, fmt.Sprintf("%s:%d", t.AgentID, t.Revision), depth, data); err != nil {
@@ -288,8 +286,8 @@ func emitEvent(ctx context.Context, tx *sql.Tx, t taskRecord, kind, source, caus
 	return id, nil
 }
 
-func initializeRootTask(ctx context.Context, tx *sql.Tx, record systemRecord, e executionRecord, now time.Time) error {
-	a := agentRecord{SystemID: record.ID, ID: record.OperatorID, Name: "operator", Revision: record.Revision, State: "active", TokenBudget: record.Configuration.Limits.TokenBudget, MaxTurns: maxTaskTurns, Definition: record.Configuration.Operator, Tools: record.Grants.OperatorTools}
+func initializeRootTask(ctx context.Context, tx *sql.Tx, record SystemRecord, e ExecutionRecord, now time.Time) error {
+	a := AgentRecord{SystemID: record.ID, ID: record.OperatorID, Name: "operator", Revision: record.Revision, State: "active", TokenBudget: record.Configuration.Limits.TokenBudget, MaxTurns: MaxTaskTurns, Definition: record.Configuration.Operator, Tools: record.Grants.OperatorTools}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(system_id,agent_id,name,revision,state,depth,token_budget,max_turns) VALUES(?,?,?,?,?,0,?,?)
 	 ON CONFLICT(system_id,agent_id) DO UPDATE SET revision=excluded.revision,state='active',token_budget=excluded.token_budget`,
 		a.SystemID, a.ID, a.Name, a.Revision, a.State, a.TokenBudget, a.MaxTurns); err != nil {
@@ -305,7 +303,7 @@ func initializeRootTask(ctx context.Context, tx *sql.Tx, record systemRecord, e 
 	if err != nil {
 		return err
 	}
-	conversation, err := json.Marshal([]chatMessage{{Role: "user", Content: e.Prompt}})
+	conversation, err := json.Marshal([]ChatMessage{{Role: "user", Content: e.Prompt}})
 	if err != nil {
 		return err
 	}
@@ -324,11 +322,11 @@ func initializeRootTask(ctx context.Context, tx *sql.Tx, record systemRecord, e 
 	return err
 }
 
-func taskTerminal(state string) bool {
+func TaskTerminal(state string) bool {
 	return state == "completed" || state == "failed" || state == "canceled" || state == "rejected"
 }
 
-func pinnedTaskRecord(ctx context.Context, tx *sql.Tx, record systemRecord, e executionRecord) (systemRecord, taskRecord, error) {
+func pinnedTaskRecord(ctx context.Context, tx *sql.Tx, record SystemRecord, e ExecutionRecord) (SystemRecord, TaskRecord, error) {
 	t, err := readTask(ctx, tx, e.SystemID, e.TaskID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return record, t, nil

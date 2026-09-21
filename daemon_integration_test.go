@@ -199,7 +199,7 @@ func TestDaemonSystemsSurviveRestartWithoutExecution(t *testing.T) {
 		t.Fatalf("configuration declarations created systems: %d %s", status, data)
 	}
 	goal := "Record this goal, but do not execute it."
-	create := createSystemCommand{"research", &goal}
+	create := createSystemCommand{Launch: "research", Goal: &goal}
 	first := daemonSystem(t, firstDaemon, fixtureControlToken, "POST", "/v1/systems", "first", create, http.StatusCreated)
 	second := daemonSystem(t, firstDaemon, fixtureControlToken, "POST", "/v1/systems", "second", create, http.StatusCreated)
 	if first.ID == second.ID || first.OperatorID == second.OperatorID || first.Goal.ID == second.Goal.ID {

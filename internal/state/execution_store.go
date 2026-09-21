@@ -1,6 +1,4 @@
-//go:build darwin || linux
-
-package main
+package state
 
 import (
 	"context"
@@ -12,7 +10,7 @@ import (
 )
 
 // ponytail: cap reviewed activations at 64; configure this only when measured workloads need more.
-const maxOperators = 64
+const MaxOperators = 64
 
 const schemaV2 = `
 CREATE TABLE systems_v2 (
@@ -98,7 +96,7 @@ CREATE TABLE quota_state (
 PRAGMA user_version = 2;
 `
 
-type startSystemCommand struct {
+type StartSystemCommand struct {
 	ExpectedRevision int64   `json:"expected_revision"`
 	Goal             *string `json:"goal,omitempty"`
 	TokenBudget      int64   `json:"token_budget,omitempty"`
@@ -106,7 +104,7 @@ type startSystemCommand struct {
 	Stream           bool    `json:"stream,omitempty"`
 }
 
-type executionRecord struct {
+type ExecutionRecord struct {
 	LearningID      string          `json:"-"`
 	CallID          string          `json:"call_id"`
 	SystemID        string          `json:"system_id"`
@@ -139,11 +137,11 @@ type executionRecord struct {
 	Retries         int64           `json:"retries"`
 	AgentID         string          `json:"agent_id"`
 	Request         []byte          `json:"-"`
-	Actions         []modelToolCall `json:"tool_calls,omitempty"`
+	Actions         []ModelToolCall `json:"tool_calls,omitempty"`
 	EventID         string          `json:"-"`
 }
 
-func readExecution(ctx context.Context, tx *sql.Tx, systemID, callID string) (e executionRecord, err error) {
+func readExecution(ctx context.Context, tx *sql.Tx, systemID, callID string) (e ExecutionRecord, err error) {
 	var actions []byte
 	err = tx.QueryRowContext(ctx, `SELECT c.call_id,c.system_id,c.goal_id,c.task_id,c.activation_id,
 	 c.activation_owner,c.revision,c.model,c.stream,c.state,c.reason,c.response,c.reservation,
@@ -169,39 +167,39 @@ func auditExecution(ctx context.Context, tx *sql.Tx, systemID, principal, action
 	return err
 }
 
-func (store *stateStore) startSystem(ctx context.Context, principal, key, systemID, owner string,
-	command startSystemCommand, cfg configuration, now time.Time) (systemRecord, error) {
-	hash, _, err := jsonDigest(struct {
+func (store *Store) StartSystem(ctx context.Context, principal, key, systemID, owner string,
+	command StartSystemCommand, cfg Configuration, now time.Time) (SystemRecord, error) {
+	hash, _, err := JsonDigest(struct {
 		Operation, SystemID string
-		Command             startSystemCommand
+		Command             StartSystemCommand
 	}{"system.start", systemID, command})
 	if err != nil {
-		return systemRecord{}, err
+		return SystemRecord{}, err
 	}
-	return store.command(ctx, principal, key, hash, func(tx *sql.Tx) (systemRecord, error) {
+	return store.command(ctx, principal, key, hash, func(tx *sql.Tx) (SystemRecord, error) {
 		record, err := readSystem(ctx, tx, principal, systemID)
 		if err != nil {
 			return record, err
 		}
 		if record.Revision != command.ExpectedRevision {
-			return record, errRevisionConflict
+			return record, ErrRevisionConflict
 		}
 		if record.State == "running" || record.State == "stopping" || record.State == "paused" {
-			return record, errExecutionConflict
+			return record, ErrExecutionConflict
 		}
-		record, err = cfg.inspect(record)
+		record, err = cfg.Inspect(record)
 		if err != nil {
 			return record, err
 		}
 		if record.BlockedReason != "" {
-			return record, invalid("grants", record.BlockedReason)
+			return record, Invalid("grants", record.BlockedReason)
 		}
 		var active int
 		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM systems WHERE state IN ('running','stopping')`).Scan(&active); err != nil {
 			return record, err
 		}
-		if active >= maxOperators {
-			return record, invalid("execution", "daemon operator capacity exhausted")
+		if active >= MaxOperators {
+			return record, Invalid("execution", "daemon operator capacity exhausted")
 		}
 		prompt, goalID := "", ""
 		if command.Goal != nil {
@@ -210,11 +208,11 @@ func (store *stateStore) startSystem(ctx context.Context, principal, key, system
 			prompt, goalID = record.Goal.Prompt, record.Goal.ID
 		}
 		if strings.TrimSpace(prompt) == "" || len(prompt) > 32768 {
-			return record, invalid("goal", "requires a new 1-32768 byte goal, or a pending initial goal")
+			return record, Invalid("goal", "requires a new 1-32768 byte goal, or a pending initial goal")
 		}
 		budget := command.TokenBudget
 		if command.LifetimeSeconds < 0 || command.LifetimeSeconds > 86400 {
-			return record, invalid("lifetime_seconds", "must be 0 (default) or 1-86400; only administrator starts may extend goal lifetime")
+			return record, Invalid("lifetime_seconds", "must be 0 (default) or 1-86400; only administrator starts may extend goal lifetime")
 		}
 		if budget == 0 {
 			budget = record.RemainingTokens
@@ -223,14 +221,14 @@ func (store *stateStore) startSystem(ctx context.Context, principal, key, system
 			}
 		}
 		if budget < 1 || budget > record.RemainingTokens {
-			return record, invalid("token_budget", "exhausted budget or goal cap exceeds remaining system allowance")
+			return record, Invalid("token_budget", "exhausted budget or goal cap exceeds remaining system allowance")
 		}
-		body, reservation, err := modelRequest(cfg, record, prompt, command.Stream)
+		body, reservation, err := ModelRequest(cfg, record, prompt, command.Stream)
 		if err != nil {
 			return record, err
 		}
 		if reservation > budget {
-			return record, invalid("token_budget", "estimated input plus output cap cannot fit the goal budget")
+			return record, Invalid("token_budget", "estimated input plus output cap cannot fit the goal budget")
 		}
 		if err := authorizePins(ctx, tx, cfg, systemID, record.Grants.OperatorTools); err != nil {
 			return record, err
@@ -240,7 +238,7 @@ func (store *stateStore) startSystem(ctx context.Context, principal, key, system
 		for _, group := range model.QuotaGroups {
 			quota := cfg.QuotaGroups[group]
 			if reservation > quota.TokensPerMinute {
-				return record, invalid("quota", "request cannot fit token capacity")
+				return record, Invalid("quota", "request cannot fit token capacity")
 			}
 			if quota.MaxWaitSeconds < wait {
 				wait = quota.MaxWaitSeconds
@@ -251,11 +249,11 @@ func (store *stateStore) startSystem(ctx context.Context, principal, key, system
 				return record, err
 			}
 			if queued >= quota.QueueCapacity {
-				return record, invalid("quota", "model queue is full")
+				return record, Invalid("quota", "model queue is full")
 			}
 		}
 		if goalID == "" {
-			goalID, err = newID("goal_")
+			goalID, err = NewID("goal_")
 			if err != nil {
 				return record, err
 			}
@@ -265,28 +263,28 @@ func (store *stateStore) startSystem(ctx context.Context, principal, key, system
 			}
 		} else {
 			if budget > record.Goal.TokenBudget {
-				return record, invalid("token_budget", "cannot expand the pending goal's cap")
+				return record, Invalid("token_budget", "cannot expand the pending goal's cap")
 			}
 			if _, err = tx.ExecContext(ctx, `UPDATE goals SET state='queued',token_budget=? WHERE system_id=? AND goal_id=?`, budget, systemID, goalID); err != nil {
 				return record, err
 			}
 		}
-		callID, err := newID("call_")
+		callID, err := NewID("call_")
 		if err != nil {
 			return record, err
 		}
-		taskID, err := newID("task_")
+		taskID, err := NewID("task_")
 		if err != nil {
 			return record, err
 		}
-		activationID, err := newID("activation_")
+		activationID, err := NewID("activation_")
 		if err != nil {
 			return record, err
 		}
 		if err := checkFrame(message{Type: "task", ID: callID, Data: prompt}); err != nil {
-			return record, invalid("goal", "encoded worker input exceeds frame limit")
+			return record, Invalid("goal", "encoded worker input exceeds frame limit")
 		}
-		deadline := now.Add(time.Duration(wait)*time.Second + 3*providerTimeout).UnixMilli()
+		deadline := now.Add(time.Duration(wait)*time.Second + 3*ProviderTimeout).UnixMilli()
 		if command.LifetimeSeconds > 0 {
 			deadline = now.Add(time.Duration(command.LifetimeSeconds) * time.Second).UnixMilli()
 		}
@@ -322,12 +320,12 @@ func (store *stateStore) startSystem(ctx context.Context, principal, key, system
 	})
 }
 
-func (store *stateStore) stopSystem(ctx context.Context, principal, key, systemID string, now time.Time) (systemRecord, error) {
-	hash, _, err := jsonDigest([]string{"system.stop", systemID})
+func (store *Store) StopSystem(ctx context.Context, principal, key, systemID string, now time.Time) (SystemRecord, error) {
+	hash, _, err := JsonDigest([]string{"system.stop", systemID})
 	if err != nil {
-		return systemRecord{}, err
+		return SystemRecord{}, err
 	}
-	return store.command(ctx, principal, key, hash, func(tx *sql.Tx) (systemRecord, error) {
+	return store.command(ctx, principal, key, hash, func(tx *sql.Tx) (SystemRecord, error) {
 		record, err := readSystem(ctx, tx, principal, systemID)
 		if err != nil {
 			return record, err
@@ -355,7 +353,7 @@ func (store *stateStore) stopSystem(ctx context.Context, principal, key, systemI
 	})
 }
 
-func (store *stateStore) listCalls(ctx context.Context, principal, systemID string, after int64) (calls []executionRecord, next int64, err error) {
+func (store *Store) ListCalls(ctx context.Context, principal, systemID string, after int64) (calls []ExecutionRecord, next int64, err error) {
 	tx, err := store.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, 0, err
@@ -387,7 +385,7 @@ func (store *stateStore) listCalls(ctx context.Context, principal, systemID stri
 		ids = ids[:20]
 		next = ids[19].seq
 	}
-	calls = make([]executionRecord, 0, len(ids))
+	calls = make([]ExecutionRecord, 0, len(ids))
 	for _, c := range ids {
 		e, err := readExecution(ctx, tx, systemID, c.id)
 		if err != nil {

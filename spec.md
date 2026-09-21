@@ -593,6 +593,36 @@ Keep large artifacts outside SQLite, referenced by digest and access scope. Use
 dependency. Start with structured keys/queries and SQLite text search, not a vector
 service or embedding pipeline; add embeddings only for a demonstrated retrieval gap.
 
+### Persistence boundary
+
+`internal/state` owns the SQLite connection, migrations, SQL, scoped artifact
+storage, and complete durable workflows. Runtime callers use typed commands,
+records, and results; no database handles, rows, transactions, or SQL callbacks
+cross that package boundary. Shared configuration and persisted record types keep
+their existing JSON representation, including exclusion of runtime-only metadata.
+
+Transactions follow workflows, not tables: a command commits its changes, audit,
+events, and replay receipt together; model admission reserves all quotas and
+ancestor/goal/system budgets together; a schedule occurrence commits its event and
+cursor/budget update together. Claim, settlement, and recovery retain the same
+authorization and ambiguity rules. The daemon supplies activation snapshots and
+shutdown state; the storage package owns no scheduler goroutines, HTTP handlers,
+provider clients, or worker processes.
+
+External tool/build execution uses typed prepare/complete operations. Preparation
+records any required dispatch receipt before execution; completion revalidates
+where required and persists the result or an explicit unknown outcome. Process
+supervision and provider networking remain outside storage.
+
+SQLite is the only implementation: retain WAL, foreign keys, full synchronization,
+one connection, and the exclusive daemon data-directory lock. This boundary is not
+an ORM or a generic per-table repository. A different backend must implement these
+workflow guarantees, migrate data, and qualify its locking/isolation semantics;
+changing the SQL driver alone is insufficient. This extraction does not change
+SQLite schema 5 or configuration schema 1.
+
+### Memory scopes
+
 | Scope | Contents | Default access |
 | --- | --- | --- |
 | Task | Conversation, tool receipts, checkpoints | Task participants with grants |

@@ -4,7 +4,7 @@ package main
 
 import (
 	"context"
-	"database/sql"
+
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,7 +12,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
-	"os"
+
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -21,6 +21,24 @@ import (
 )
 
 type brokerClock struct{ milliseconds atomic.Int64 }
+
+func TestCancelRejectedSessionDoesNotDisableBroker(t *testing.T) {
+	cfg := fixtureConfiguration(t)
+	broker, _, id := fixtureBroker(t, cfg)
+	call := fixtureCall(t, broker, id, "cancel-session", false)
+	foreign := call
+	foreign.ActivationID += "-foreign"
+	if _, err := broker.cancelQueued(foreign); err == nil {
+		t.Fatal("foreign cancellation was authorized")
+	}
+	if !broker.available() {
+		t.Fatal("rejected cancellation disabled shared admission")
+	}
+	if result, err := broker.cancelQueued(call); err != nil || result.State != "canceled" {
+		t.Fatalf("authorized cancellation: %+v, %v", result, err)
+	}
+	assertCount(t, broker.store, "model_attempts", 0)
+}
 
 func (c *brokerClock) now() time.Time { return time.UnixMilli(c.milliseconds.Load()) }
 
@@ -38,11 +56,11 @@ func fixtureBroker(t *testing.T, cfg configuration) (*modelBroker, *brokerClock,
 func fixtureCall(t *testing.T, b *modelBroker, configID, key string, stream bool) executionRecord {
 	t.Helper()
 	goal := "fixture goal"
-	record, err := b.store.createSystem(context.Background(), localAdministrator, "create-"+key, createSystemCommand{"research", &goal}, b.cfg, configID)
+	record, err := b.store.CreateSystem(context.Background(), localAdministrator, "create-"+key, createSystemCommand{Launch: "research", Goal: &goal}, b.cfg, configID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	started, err := b.store.startSystem(context.Background(), localAdministrator, "start-"+key, record.ID, "fixture-owner",
+	started, err := b.store.StartSystem(context.Background(), localAdministrator, "start-"+key, record.ID, "fixture-owner",
 		startSystemCommand{ExpectedRevision: 1, Stream: stream}, b.cfg, b.now())
 	if err != nil {
 		t.Fatal(err)
@@ -143,7 +161,7 @@ func TestBrokerSharedAdmissionAndFairness(t *testing.T) {
 	if count.Load() != 3 {
 		t.Fatalf("dispatch count after refill = %d", count.Load())
 	}
-	record, err := b.store.getSystem(ctx, localAdministrator, a.SystemID)
+	record, err := b.store.GetSystem(ctx, localAdministrator, a.SystemID)
 	if err != nil || record.UsedTokens != 18 || record.ReservedTokens != 0 || record.Execution.Response != "tracked result" {
 		t.Fatalf("usage/result not reconciled: %+v %v", record, err)
 	}
@@ -163,7 +181,7 @@ func TestBrokerAllQuotaGroupsAndTokenWindow(t *testing.T) {
 	q.MaxConcurrent = 10
 	q.MaxWaitSeconds = 120
 	cfg.QuotaGroups["account"], cfg.QuotaGroups["organization"] = q, q
-	grants, err := cfg.grantsFor(cfg.Systems["research"])
+	grants, err := cfg.GrantsFor(cfg.Systems["research"])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,16 +245,16 @@ func TestBrokerDenialsAndAtomicReservations(t *testing.T) {
 			case "revoked":
 				delete(cfg.Models, "default")
 			case "stopped":
-				if _, err := b.store.stopSystem(context.Background(), localAdministrator, "stop", e.SystemID, b.now()); err != nil {
+				if _, err := b.store.StopSystem(context.Background(), localAdministrator, "stop", e.SystemID, b.now()); err != nil {
 					t.Fatal(err)
 				}
 
 			case "budget":
-				if _, err := b.store.db.Exec(`UPDATE systems SET used_tokens=49000 WHERE system_id=?`, e.SystemID); err != nil {
+				if _, err := testDB(t, b.store).Exec(`UPDATE systems SET used_tokens=49000 WHERE system_id=?`, e.SystemID); err != nil {
 					t.Fatal(err)
 				}
 			case "audit failure":
-				if _, err := b.store.db.Exec(`CREATE TRIGGER fail_dispatch BEFORE INSERT ON audit WHEN NEW.action='model.dispatch'
+				if _, err := testDB(t, b.store).Exec(`CREATE TRIGGER fail_dispatch BEFORE INSERT ON audit WHEN NEW.action='model.dispatch'
 				 BEGIN SELECT RAISE(ABORT,'fixture audit failure'); END`); err != nil {
 					t.Fatal(err)
 				}
@@ -252,7 +270,7 @@ func TestBrokerDenialsAndAtomicReservations(t *testing.T) {
 			}
 			assertCount(t, b.store, "model_attempts", 0)
 			var reserved int64
-			if err := b.store.db.QueryRow(`SELECT COALESCE(SUM(reserved_tokens),0) FROM systems`).Scan(&reserved); err != nil || reserved != 0 {
+			if err := testDB(t, b.store).QueryRow(`SELECT COALESCE(SUM(reserved_tokens),0) FROM systems`).Scan(&reserved); err != nil || reserved != 0 {
 				t.Fatalf("partial reservation: %d %v", reserved, err)
 			}
 			if mode == "audit failure" && b.available() {
@@ -264,7 +282,7 @@ func TestBrokerDenialsAndAtomicReservations(t *testing.T) {
 
 func TestBrokerClockRollbackCannotRefundTokenRate(t *testing.T) {
 	cfg, count := providerConfigFor(t, func(w http.ResponseWriter, r *http.Request) { completion(w, "bounded") })
-	grants, err := cfg.grantsFor(cfg.Systems["research"])
+	grants, err := cfg.GrantsFor(cfg.Systems["research"])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,17 +310,17 @@ func TestInitialGoalBudgetAndCommandReplay(t *testing.T) {
 	cfg := fixtureConfiguration(t)
 	b, _, id := fixtureBroker(t, cfg)
 	goal := "fixture goal"
-	record, err := b.store.createSystem(context.Background(), localAdministrator, "create", createSystemCommand{"research", &goal}, cfg, id)
+	record, err := b.store.CreateSystem(context.Background(), localAdministrator, "create", createSystemCommand{Launch: "research", Goal: &goal}, cfg, id)
 	if err != nil {
 		t.Fatal(err)
 	}
 	def := record.Configuration
 	def.Limits.TokenBudget = 60000
-	revised, err := b.store.reviseSystem(context.Background(), localAdministrator, "revise", record.ID, reviseSystemCommand{ExpectedRevision: 1, Configuration: &def}, cfg, id)
+	revised, err := b.store.ReviseSystem(context.Background(), localAdministrator, "revise", record.ID, reviseSystemCommand{ExpectedRevision: 1, Configuration: &def}, cfg, id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	started, err := b.store.startSystem(context.Background(), localAdministrator, "start", record.ID, "owner", startSystemCommand{ExpectedRevision: 2}, cfg, b.now())
+	started, err := b.store.StartSystem(context.Background(), localAdministrator, "start", record.ID, "owner", startSystemCommand{ExpectedRevision: 2}, cfg, b.now())
 	if err != nil || started.Execution.GoalBudget != record.Goal.TokenBudget || revised.Configuration.Limits.TokenBudget != 60000 {
 		t.Fatalf("pending goal cap expanded or prevented a valid start: %+v %v", started.Execution, err)
 	}
@@ -324,10 +342,10 @@ func TestInitialGoalBudgetAndCommandReplay(t *testing.T) {
 	if canceled.Load() {
 		t.Fatal("replayed stop canceled another activation")
 	}
-	if _, _, err := b.store.listCalls(context.Background(), "foreign-owner", record.ID, 0); !errors.Is(err, errSystemNotFound) {
+	if _, _, err := b.store.ListCalls(context.Background(), "foreign-owner", record.ID, 0); !errors.Is(err, errSystemNotFound) {
 		t.Fatalf("call history leaked across owners: %v", err)
 	}
-	if err := b.store.db.Close(); err != nil {
+	if err := b.store.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := engine.stop(context.Background(), localAdministrator, "emergency", record.ID); err == nil || !canceled.Load() {
@@ -343,11 +361,11 @@ func TestBrokerQueueBoundsAndCancellation(t *testing.T) {
 	b, _, id := fixtureBroker(t, cfg)
 	e := fixtureCall(t, b, id, "one", false)
 	goal := "fixture goal"
-	record, err := b.store.createSystem(context.Background(), localAdministrator, "two", createSystemCommand{"research", &goal}, cfg, id)
+	record, err := b.store.CreateSystem(context.Background(), localAdministrator, "two", createSystemCommand{Launch: "research", Goal: &goal}, cfg, id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = b.store.startSystem(context.Background(), localAdministrator, "start-two", record.ID, "fixture-owner", startSystemCommand{ExpectedRevision: 1}, cfg, b.now())
+	_, err = b.store.StartSystem(context.Background(), localAdministrator, "start-two", record.ID, "fixture-owner", startSystemCommand{ExpectedRevision: 1}, cfg, b.now())
 	if err == nil || !strings.Contains(err.Error(), "queue") {
 		t.Fatalf("queue bound: %v", err)
 	}
@@ -382,7 +400,7 @@ func TestBrokerThrottleRecoveryAndUnknownUsage(t *testing.T) {
 			if err := b.settle(context.Background(), current, result, b.now()); err != nil {
 				t.Fatal(err)
 			}
-			before, err := b.store.getSystem(context.Background(), localAdministrator, e.SystemID)
+			before, err := b.store.GetSystem(context.Background(), localAdministrator, e.SystemID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -392,19 +410,19 @@ func TestBrokerThrottleRecoveryAndUnknownUsage(t *testing.T) {
 			if !unknown && (before.ReservedTokens != 0 || before.Execution.State != "queued") {
 				t.Fatalf("throttle reservation: %+v", before)
 			}
-			if err := b.store.db.Close(); err != nil {
+			if err := b.store.Close(); err != nil {
 				t.Fatal(err)
 			}
-			reopened, err := openStore(context.Background(), filepath.Join(cfg.DataDir, "state.db"))
+			reopened, err := openTestStore(t, context.Background(), filepath.Join(cfg.DataDir, "state.db"))
 			if err != nil {
 				t.Fatal(err)
 			}
-			t.Cleanup(func() { reopened.db.Close() })
-			if err := reopened.recoverExecutions(context.Background()); err != nil {
+			t.Cleanup(func() { reopened.Close() })
+			if err := reopened.RecoverExecutions(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 			b.store = reopened
-			after, err := reopened.getSystem(context.Background(), localAdministrator, e.SystemID)
+			after, err := reopened.GetSystem(context.Background(), localAdministrator, e.SystemID)
 			wantState := "running"
 			if unknown {
 				wantState = "stopped"
@@ -439,7 +457,7 @@ func TestRetryCannotOverfillSharedQueue(t *testing.T) {
 	if err := b.settle(context.Background(), current, result, b.now()); err != nil {
 		t.Fatal(err)
 	}
-	record, err := b.store.getSystem(context.Background(), localAdministrator, first.SystemID)
+	record, err := b.store.GetSystem(context.Background(), localAdministrator, first.SystemID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,161 +470,15 @@ func TestRetryCannotOverfillSharedQueue(t *testing.T) {
 	}
 }
 
-func TestStoreMigrationFromPopulatedVersionOne(t *testing.T) {
-	cfg := fixtureConfiguration(t)
-	if err := os.MkdirAll(cfg.DataDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	filename := filepath.Join(cfg.DataDir, "state.db")
-	file, err := os.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	file.Close()
-	db, err := sql.Open("sqlite", filename)
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacy := &stateStore{db: db}
-	if _, err := db.Exec(schemaV1); err != nil {
-		t.Fatal(err)
-	}
-	id, err := legacy.rememberConfiguration(context.Background(), cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	goal := "preserve this goal"
-	record, err := legacy.createSystem(context.Background(), localAdministrator, "legacy", createSystemCommand{"research", &goal}, cfg, id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`UPDATE systems SET used_tokens=23 WHERE system_id=?`, record.ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	migrated, err := openStore(context.Background(), filename)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer migrated.db.Close()
-	saved, err := migrated.getSystem(context.Background(), localAdministrator, record.ID)
-	if err != nil || saved.UsedTokens != 23 || saved.Goal.Prompt != goal || saved.State != "inactive" {
-		t.Fatalf("migration lost state: %+v %v", saved, err)
-	}
-	var keys, version int
-	if err := migrated.db.QueryRow("PRAGMA foreign_keys").Scan(&keys); err != nil {
-		t.Fatal(err)
-	}
-	if err := migrated.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
-		t.Fatal(err)
-	}
-	if keys != 1 || version != 5 {
-		t.Fatalf("migration enforcement/version = %d/%d", keys, version)
-	}
-	if _, err := migrated.db.Exec(`DELETE FROM audit`); err == nil {
-		t.Fatal("migration removed audit protection")
-	}
-	if _, err := migrated.db.Exec(`UPDATE goals SET system_id='foreign'`); err == nil {
-		t.Fatal("migration disabled foreign keys")
-	}
-	replay, err := migrated.createSystem(context.Background(), localAdministrator, "legacy", createSystemCommand{"research", &goal}, cfg, id)
-	if err != nil || replay.ID != record.ID {
-		t.Fatalf("legacy receipt failed: %+v %v", replay, err)
-	}
-}
-
-func TestStoreMigrationPreservesPopulatedVersionTwo(t *testing.T) {
-	cfg := fixtureConfiguration(t)
-	if err := os.MkdirAll(cfg.DataDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	filename := filepath.Join(cfg.DataDir, "state.db")
-	file, err := os.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	file.Close()
-	db, err := sql.Open("sqlite", filename)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(schemaV1); err != nil {
-		t.Fatal(err)
-	}
-	legacy := &stateStore{db: db}
-	id, err := legacy.rememberConfiguration(context.Background(), cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	goal := "legacy dispatched goal"
-	record, err := legacy.createSystem(context.Background(), localAdministrator, "legacy-v2", createSystemCommand{"research", &goal}, cfg, id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(schemaV2); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UnixMilli()
-	if _, err := db.Exec(`UPDATE systems SET state='running',used_tokens=23,reserved_tokens=123 WHERE system_id=?;
-	 UPDATE goals SET state='running',used_tokens=23,reserved_tokens=123 WHERE system_id=?`, record.ID, record.ID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`INSERT INTO model_calls(call_id,system_id,goal_id,task_id,activation_id,activation_owner,revision,model,stream,state,reservation,attempts,created_at,queued_at,deadline,wait_deadline)
-	 VALUES('legacy-call',?,?,'legacy-task','legacy-activation','legacy-owner',1,'default',0,'running',123,1,?,?,?,?)`,
-		record.ID, record.Goal.ID, now, now, now+60000, now+60000); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`INSERT INTO call_groups(call_id,system_id,group_name) VALUES('legacy-call',?,'account')`, record.ID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`INSERT INTO model_attempts(call_id,system_id,dispatched_at,reservation,state) VALUES('legacy-call',?,?,123,'running')`, record.ID, now); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`INSERT INTO quota_state(group_name,credit,updated_at,cooldown_until) VALUES('account',0,?,?)`, now, now+30000); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	migrated, err := openStore(context.Background(), filename)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer migrated.db.Close()
-	if err := migrated.recoverExecutions(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	saved, err := migrated.getSystem(context.Background(), localAdministrator, record.ID)
-	if err != nil || saved.State != "stopped" || saved.UsedTokens != 23 || saved.ReservedTokens != 123 || saved.Execution.State != "unknown" || saved.Execution.AgentID != record.OperatorID {
-		t.Fatalf("v2 accounting/history lost: %+v %v", saved, err)
-	}
-	for table, count := range map[string]int{"model_calls": 1, "model_attempts": 1, "call_groups": 1, "command_receipts": 1, "tasks": 0} {
-		assertCount(t, migrated, table, count)
-	}
-	var cooldown int64
-	if err := migrated.db.QueryRow(`SELECT cooldown_until FROM quota_state WHERE group_name='account'`).Scan(&cooldown); err != nil || cooldown != now+30000 {
-		t.Fatalf("cooldown lost: %d %v", cooldown, err)
-	}
-	replay, err := migrated.createSystem(context.Background(), localAdministrator, "legacy-v2", createSystemCommand{"research", &goal}, cfg, id)
-	if err != nil || replay.ID != record.ID {
-		t.Fatalf("legacy receipt lost: %+v %v", replay, err)
-	}
-	if _, err := migrated.db.Exec(`DELETE FROM audit`); err == nil {
-		t.Fatal("audit became mutable")
-	}
-}
-
 func TestBrokerRejectsOversizedAndImpossibleRequests(t *testing.T) {
 	cfg := fixtureConfiguration(t)
 	b, _, id := fixtureBroker(t, cfg)
 	goal := strings.Repeat("\x01", 32768)
-	record, err := b.store.createSystem(context.Background(), localAdministrator, "large", createSystemCommand{"research", &goal}, cfg, id)
+	record, err := b.store.CreateSystem(context.Background(), localAdministrator, "large", createSystemCommand{Launch: "research", Goal: &goal}, cfg, id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = b.store.startSystem(context.Background(), localAdministrator, "large-start", record.ID, "owner", startSystemCommand{ExpectedRevision: 1}, cfg, b.now())
+	_, err = b.store.StartSystem(context.Background(), localAdministrator, "large-start", record.ID, "owner", startSystemCommand{ExpectedRevision: 1}, cfg, b.now())
 	var field *fieldError
 	if !errors.As(err, &field) {
 		t.Fatalf("oversized model request accepted: %v", err)

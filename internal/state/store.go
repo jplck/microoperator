@@ -1,6 +1,4 @@
-//go:build darwin || linux
-
-package main
+package state
 
 import (
 	"context"
@@ -19,27 +17,27 @@ import (
 )
 
 var (
-	errSystemNotFound    = errors.New("system not found")
-	errCommandConflict   = errors.New("idempotency key was already used for a different command")
-	errRevisionConflict  = errors.New("system revision has changed")
-	errExecutionConflict = errors.New("execution state conflicts with this command; stop active work before revising or starting again")
+	ErrSystemNotFound    = errors.New("system not found")
+	ErrCommandConflict   = errors.New("idempotency key was already used for a different command")
+	ErrRevisionConflict  = errors.New("system revision has changed")
+	ErrExecutionConflict = errors.New("execution state conflicts with this command; stop active work before revising or starting again")
 )
 
-type toolPin struct {
+type ToolPin struct {
 	Name    string `json:"name"`
 	Version int64  `json:"version"`
 	Digest  string `json:"digest"`
 }
 
-type systemGrants struct {
+type SystemGrants struct {
 	Model             string    `json:"model"`
 	SandboxProfile    string    `json:"sandbox_profile"`
-	SystemTools       []toolPin `json:"system_tools"`
-	OperatorTools     []toolPin `json:"operator_tools"`
+	SystemTools       []ToolPin `json:"system_tools"`
+	OperatorTools     []ToolPin `json:"operator_tools"`
 	DefinitionsDigest string    `json:"definitions_digest"`
 }
 
-type initialGoal struct {
+type InitialGoal struct {
 	ID          string `json:"goal_id"`
 	SystemID    string `json:"system_id"`
 	Prompt      string `json:"prompt"`
@@ -47,38 +45,38 @@ type initialGoal struct {
 	TokenBudget int64  `json:"token_budget"`
 }
 
-type systemRecord struct {
-	localTools      map[string]toolConfig
-	ID              string           `json:"system_id"`
-	OperatorID      string           `json:"operator_id"`
-	Launch          string           `json:"launch"`
-	State           string           `json:"state"`
-	Revision        int64            `json:"revision"`
-	ConfigurationID string           `json:"configuration_id"`
-	Configuration   systemConfig     `json:"configuration"`
-	Grants          systemGrants     `json:"grants"`
-	UsedTokens      int64            `json:"used_tokens"`
-	ReservedTokens  int64            `json:"reserved_tokens"`
-	RemainingTokens int64            `json:"remaining_tokens"`
-	Goal            *initialGoal     `json:"initial_goal,omitempty"`
-	CreatedAt       string           `json:"created_at"`
-	BlockedReason   string           `json:"blocked_reason,omitempty"`
-	Execution       *executionRecord `json:"execution,omitempty"`
-	CommandResult   json.RawMessage  `json:"command_result,omitempty"`
+type SystemRecord struct {
+	LocalTools      map[string]ToolConfig `json:"-"`
+	ID              string                `json:"system_id"`
+	OperatorID      string                `json:"operator_id"`
+	Launch          string                `json:"launch"`
+	State           string                `json:"state"`
+	Revision        int64                 `json:"revision"`
+	ConfigurationID string                `json:"configuration_id"`
+	Configuration   SystemConfig          `json:"configuration"`
+	Grants          SystemGrants          `json:"grants"`
+	UsedTokens      int64                 `json:"used_tokens"`
+	ReservedTokens  int64                 `json:"reserved_tokens"`
+	RemainingTokens int64                 `json:"remaining_tokens"`
+	Goal            *InitialGoal          `json:"initial_goal,omitempty"`
+	CreatedAt       string                `json:"created_at"`
+	BlockedReason   string                `json:"blocked_reason,omitempty"`
+	Execution       *ExecutionRecord      `json:"execution,omitempty"`
+	CommandResult   json.RawMessage       `json:"command_result,omitempty"`
 }
 
-type createSystemCommand struct {
+type CreateSystemCommand struct {
 	Launch string  `json:"launch"`
 	Goal   *string `json:"goal,omitempty"`
 }
 
-type reviseSystemCommand struct {
+type ReviseSystemCommand struct {
 	ExpectedRevision int64         `json:"expected_revision"`
-	Configuration    *systemConfig `json:"configuration"`
-	LocalTools       []toolPin     `json:"local_tools,omitempty"`
+	Configuration    *SystemConfig `json:"configuration"`
+	LocalTools       []ToolPin     `json:"local_tools,omitempty"`
 }
 
-type stateStore struct{ db *sql.DB }
+type Store struct{ db *sql.DB }
 
 const schemaV1 = `
 CREATE TABLE config_snapshots (
@@ -155,13 +153,13 @@ PRAGMA application_id = 1297043538;
 // a second in-memory lock. The daemon must hold its data-directory lock first.
 // Per-connection pragmas preserve foreign keys and durability if the driver ever
 // replaces that connection; contexts also cancel requests waiting for the pool.
-func openStore(ctx context.Context, filename string) (*stateStore, error) {
+func Open(ctx context.Context, filename string) (*Store, error) {
 	for _, suffix := range []string{"", "-wal", "-shm"} {
 		flags := os.O_RDWR
 		if suffix == "" {
 			flags |= os.O_CREATE
 		}
-		file, err := openOwnedFile(filename+suffix, flags, true)
+		file, err := OpenOwnedFile(filename+suffix, flags, true)
 		if suffix != "" && errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -184,7 +182,7 @@ func openStore(ctx context.Context, filename string) (*stateStore, error) {
 	}
 	// ponytail: serialize this local control API; add a read pool only if measured contention warrants it.
 	db.SetMaxOpenConns(1)
-	store := &stateStore{db: db}
+	store := &Store{db: db}
 	if err := store.migrate(ctx); err != nil {
 		return nil, errors.Join(err, db.Close())
 	}
@@ -198,7 +196,7 @@ func openStore(ctx context.Context, filename string) (*stateStore, error) {
 	return store, nil
 }
 
-func (store *stateStore) migrate(ctx context.Context) (err error) {
+func (store *Store) migrate(ctx context.Context) (err error) {
 	conn, err := store.db.Conn(ctx)
 	if err != nil {
 		return err
@@ -292,8 +290,8 @@ func rollback(tx *sql.Tx, result *error) {
 	}
 }
 
-func (store *stateStore) rememberConfiguration(ctx context.Context, cfg configuration) (string, error) {
-	id, data, err := jsonDigest(cfg)
+func (store *Store) RememberConfiguration(ctx context.Context, cfg Configuration) (string, error) {
+	id, data, err := JsonDigest(cfg)
 	if err != nil {
 		return "", err
 	}
@@ -306,7 +304,7 @@ func (store *stateStore) rememberConfiguration(ctx context.Context, cfg configur
 	return id, nil
 }
 
-func newID(prefix string) (string, error) {
+func NewID(prefix string) (string, error) {
 	var bytes [16]byte
 	if _, err := rand.Read(bytes[:]); err != nil {
 		return "", fmt.Errorf("generate identity: %w", err)
@@ -314,37 +312,37 @@ func newID(prefix string) (string, error) {
 	return prefix + hex.EncodeToString(bytes[:]), nil
 }
 
-func (cfg configuration) grantsFor(definition systemConfig) (systemGrants, error) {
-	grants := systemGrants{
+func (cfg Configuration) GrantsFor(definition SystemConfig) (SystemGrants, error) {
+	grants := SystemGrants{
 		Model: definition.Operator.Model, SandboxProfile: definition.Operator.SandboxProfile,
-		SystemTools: []toolPin{}, OperatorTools: []toolPin{},
+		SystemTools: []ToolPin{}, OperatorTools: []ToolPin{},
 	}
 	model := cfg.Models[definition.Operator.Model]
-	quotas := make(map[string]quotaConfig)
+	quotas := make(map[string]QuotaConfig)
 	for _, name := range model.QuotaGroups {
 		quotas[name] = cfg.QuotaGroups[name]
 	}
-	tools := make(map[string]toolConfig)
-	pins := make(map[string]toolPin)
+	tools := make(map[string]ToolConfig)
+	pins := make(map[string]ToolPin)
 	for _, name := range definition.Tools {
-		tool, _ := cfg.tool(name)
-		digest, _, err := jsonDigest(tool)
+		Tool, _ := cfg.Tool(name)
+		digest, _, err := JsonDigest(Tool)
 		if err != nil {
 			return grants, err
 		}
-		pins[name] = toolPin{Name: name, Version: tool.Version, Digest: digest}
+		pins[name] = ToolPin{Name: name, Version: Tool.Version, Digest: digest}
 		grants.SystemTools = append(grants.SystemTools, pins[name])
-		tools[name] = tool
+		tools[name] = Tool
 	}
 	for _, name := range definition.Operator.Tools {
 		grants.OperatorTools = append(grants.OperatorTools, pins[name])
 	}
-	digest, _, err := jsonDigest(struct {
-		Model    modelConfig            `json:"model"`
-		Provider providerConfig         `json:"provider"`
-		Quotas   map[string]quotaConfig `json:"quotas"`
-		Profile  sandboxConfig          `json:"profile"`
-		Tools    map[string]toolConfig  `json:"tools"`
+	digest, _, err := JsonDigest(struct {
+		Model    ModelConfig            `json:"model"`
+		Provider ProviderConfig         `json:"provider"`
+		Quotas   map[string]QuotaConfig `json:"quotas"`
+		Profile  SandboxConfig          `json:"profile"`
+		Tools    map[string]ToolConfig  `json:"tools"`
 	}{model, cfg.Providers[model.Provider], quotas, cfg.SandboxProfiles[definition.Operator.SandboxProfile], tools})
 	grants.DefinitionsDigest = digest
 	return grants, err
@@ -353,14 +351,14 @@ func (cfg configuration) grantsFor(definition systemConfig) (systemGrants, error
 // inspect retains the saved revision. Administrative changes can block it, but
 // cannot silently substitute a new model, profile, tool version, or quota policy.
 // A later explicit revision binds the user's selection to the new definitions.
-func (cfg configuration) inspect(record systemRecord) (systemRecord, error) {
-	cfg = cfg.withLocalTools(record.localTools)
+func (cfg Configuration) Inspect(record SystemRecord) (SystemRecord, error) {
+	cfg = cfg.WithLocalTools(record.LocalTools)
 	record.RemainingTokens = record.Configuration.Limits.TokenBudget - record.UsedTokens - record.ReservedTokens
-	if err := cfg.validateSystem(record.Configuration); err != nil {
+	if err := cfg.ValidateSystem(record.Configuration); err != nil {
 		record.BlockedReason = err.Error()
 		return record, nil
 	}
-	current, err := cfg.grantsFor(record.Configuration)
+	current, err := cfg.GrantsFor(record.Configuration)
 	if err != nil {
 		return record, err
 	}
@@ -373,9 +371,9 @@ func (cfg configuration) inspect(record systemRecord) (systemRecord, error) {
 // command commits the resource, immutable revision, audit entry, and replay
 // receipt together. A lost HTTP response can therefore be retried without
 // creating a second system or applying a revision twice, even after a restart.
-func (store *stateStore) command(ctx context.Context, principal, key, requestHash string,
-	mutate func(*sql.Tx) (systemRecord, error),
-) (result systemRecord, err error) {
+func (store *Store) command(ctx context.Context, principal, key, requestHash string,
+	mutate func(*sql.Tx) (SystemRecord, error),
+) (result SystemRecord, err error) {
 	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return result, fmt.Errorf("begin command: %w", err)
@@ -388,12 +386,12 @@ func (store *stateStore) command(ctx context.Context, principal, key, requestHas
 		principal, key).Scan(&savedHash, &response)
 	if err == nil {
 		if savedHash != requestHash {
-			return result, errCommandConflict
+			return result, ErrCommandConflict
 		}
 		if err := json.Unmarshal(response, &result); err != nil {
 			return result, fmt.Errorf("decode command receipt: %w", err)
 		}
-		result.localTools, err = loadLocalTools(ctx, tx, result.ID, result.Grants.SystemTools)
+		result.LocalTools, err = loadLocalTools(ctx, tx, result.ID, result.Grants.SystemTools)
 		return result, err
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -418,36 +416,36 @@ func (store *stateStore) command(ctx context.Context, principal, key, requestHas
 	return result, nil
 }
 
-func (store *stateStore) createSystem(ctx context.Context, principal, key string,
-	command createSystemCommand, cfg configuration, configID string,
-) (systemRecord, error) {
-	hash, _, err := jsonDigest(struct {
+func (store *Store) CreateSystem(ctx context.Context, principal, key string,
+	command CreateSystemCommand, cfg Configuration, configID string,
+) (SystemRecord, error) {
+	hash, _, err := JsonDigest(struct {
 		Operation string              `json:"operation"`
-		Command   createSystemCommand `json:"command"`
+		Command   CreateSystemCommand `json:"command"`
 	}{"system.create", command})
 	if err != nil {
-		return systemRecord{}, err
+		return SystemRecord{}, err
 	}
-	return store.command(ctx, principal, key, hash, func(tx *sql.Tx) (systemRecord, error) {
-		var record systemRecord
+	return store.command(ctx, principal, key, hash, func(tx *sql.Tx) (SystemRecord, error) {
+		var record SystemRecord
 		definition, ok := cfg.Systems[command.Launch]
 		if !ok {
-			return record, invalid("launch", "unknown launch configuration")
+			return record, Invalid("launch", "unknown launch configuration")
 		}
-		if err := cfg.validateSystem(definition); err != nil {
+		if err := cfg.ValidateSystem(definition); err != nil {
 			return record, err
 		}
-		record.ID, err = newID("sys_")
+		record.ID, err = NewID("sys_")
 		if err != nil {
 			return record, err
 		}
-		record.OperatorID, err = newID("agent_")
+		record.OperatorID, err = NewID("agent_")
 		if err != nil {
 			return record, err
 		}
 		record.Launch, record.State, record.Revision = command.Launch, "inactive", 1
 		record.ConfigurationID, record.Configuration = configID, definition
-		record.Grants, err = cfg.grantsFor(definition)
+		record.Grants, err = cfg.GrantsFor(definition)
 		if err != nil {
 			return record, err
 		}
@@ -461,11 +459,11 @@ func (store *stateStore) createSystem(ctx context.Context, principal, key string
 			return record, err
 		}
 		if command.Goal != nil {
-			goalID, err := newID("goal_")
+			goalID, err := NewID("goal_")
 			if err != nil {
 				return record, err
 			}
-			record.Goal = &initialGoal{goalID, record.ID, *command.Goal, "pending", definition.Limits.TokenBudget}
+			record.Goal = &InitialGoal{goalID, record.ID, *command.Goal, "pending", definition.Limits.TokenBudget}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO goals
 				(goal_id, system_id, owner, prompt, state, token_budget) VALUES (?, ?, ?, ?, ?, ?)`,
 				goalID, record.ID, principal, *command.Goal, "pending", record.Goal.TokenBudget); err != nil {
@@ -476,46 +474,46 @@ func (store *stateStore) createSystem(ctx context.Context, principal, key string
 	})
 }
 
-func (store *stateStore) reviseSystem(ctx context.Context, principal, key, systemID string,
-	command reviseSystemCommand, cfg configuration, configID string,
-) (systemRecord, error) {
-	hash, _, err := jsonDigest(struct {
+func (store *Store) ReviseSystem(ctx context.Context, principal, key, systemID string,
+	command ReviseSystemCommand, cfg Configuration, configID string,
+) (SystemRecord, error) {
+	hash, _, err := JsonDigest(struct {
 		Operation string              `json:"operation"`
 		SystemID  string              `json:"system_id"`
-		Command   reviseSystemCommand `json:"command"`
+		Command   ReviseSystemCommand `json:"command"`
 	}{"system.revise", systemID, command})
 	if err != nil {
-		return systemRecord{}, err
+		return SystemRecord{}, err
 	}
-	return store.command(ctx, principal, key, hash, func(tx *sql.Tx) (systemRecord, error) {
+	return store.command(ctx, principal, key, hash, func(tx *sql.Tx) (SystemRecord, error) {
 		record, err := readSystem(ctx, tx, principal, systemID)
 		if err != nil {
 			return record, err
 		}
 		if command.ExpectedRevision != record.Revision {
-			return record, errRevisionConflict
+			return record, ErrRevisionConflict
 		}
 		if record.State == "running" || record.State == "stopping" || record.State == "paused" {
-			return record, errExecutionConflict
+			return record, ErrExecutionConflict
 		}
 		if command.Configuration == nil {
-			return record, invalid("configuration", "is required")
+			return record, Invalid("configuration", "is required")
 		}
-		locals, err := loadLocalTools(ctx, tx, record.ID, append(append([]toolPin{}, record.Grants.SystemTools...), command.LocalTools...))
+		locals, err := loadLocalTools(ctx, tx, record.ID, append(append([]ToolPin{}, record.Grants.SystemTools...), command.LocalTools...))
 		if err != nil {
 			return record, err
 		}
-		cfg = cfg.withLocalTools(locals)
-		record.localTools = locals
-		if err := cfg.validateSystem(*command.Configuration); err != nil {
+		cfg = cfg.WithLocalTools(locals)
+		record.LocalTools = locals
+		if err := cfg.ValidateSystem(*command.Configuration); err != nil {
 			return record, err
 		}
 		if command.Configuration.Limits.TokenBudget < record.UsedTokens+record.ReservedTokens {
-			return record, invalid("limits.token_budget", "cannot be lower than consumed or reserved usage")
+			return record, Invalid("limits.token_budget", "cannot be lower than consumed or reserved usage")
 		}
 		record.Configuration, record.ConfigurationID = *command.Configuration, configID
 		record.Revision++
-		record.Grants, err = cfg.grantsFor(record.Configuration)
+		record.Grants, err = cfg.GrantsFor(record.Configuration)
 		if err != nil {
 			return record, err
 		}
@@ -533,7 +531,7 @@ func (store *stateStore) reviseSystem(ctx context.Context, principal, key, syste
 	})
 }
 
-func insertRevision(ctx context.Context, tx *sql.Tx, record systemRecord, principal, action string) error {
+func insertRevision(ctx context.Context, tx *sql.Tx, record SystemRecord, principal, action string) error {
 	definition, err := json.Marshal(record.Configuration)
 	if err != nil {
 		return err
@@ -556,8 +554,8 @@ func insertRevision(ctx context.Context, tx *sql.Tx, record systemRecord, princi
 	return nil
 }
 
-func readSystem(ctx context.Context, tx *sql.Tx, principal, systemID string) (systemRecord, error) {
-	var record systemRecord
+func readSystem(ctx context.Context, tx *sql.Tx, principal, systemID string) (SystemRecord, error) {
+	var record SystemRecord
 	var definition, grants []byte
 	err := tx.QueryRowContext(ctx, `SELECT s.system_id, s.operator_id, s.launch, s.state,
 		s.revision, s.used_tokens, s.reserved_tokens, s.created_at, r.config_id, r.definition, r.grants
@@ -566,7 +564,7 @@ func readSystem(ctx context.Context, tx *sql.Tx, principal, systemID string) (sy
 		&record.ID, &record.OperatorID, &record.Launch, &record.State, &record.Revision,
 		&record.UsedTokens, &record.ReservedTokens, &record.CreatedAt, &record.ConfigurationID, &definition, &grants)
 	if errors.Is(err, sql.ErrNoRows) {
-		return record, errSystemNotFound
+		return record, ErrSystemNotFound
 	}
 	if err != nil {
 		return record, fmt.Errorf("read system: %w", err)
@@ -577,11 +575,11 @@ func readSystem(ctx context.Context, tx *sql.Tx, principal, systemID string) (sy
 	if err := json.Unmarshal(grants, &record.Grants); err != nil {
 		return record, fmt.Errorf("decode persisted grants: %w", err)
 	}
-	record.localTools, err = loadLocalTools(ctx, tx, record.ID, record.Grants.SystemTools)
+	record.LocalTools, err = loadLocalTools(ctx, tx, record.ID, record.Grants.SystemTools)
 	if err != nil {
 		return record, err
 	}
-	var goal initialGoal
+	var goal InitialGoal
 	err = tx.QueryRowContext(ctx, `SELECT goal_id, system_id, prompt, state, token_budget
 		FROM goals WHERE system_id = ? AND owner = ? AND is_initial = 1`, systemID, principal).Scan(
 		&goal.ID, &goal.SystemID, &goal.Prompt, &goal.State, &goal.TokenBudget)
@@ -599,7 +597,7 @@ func readSystem(ctx context.Context, tx *sql.Tx, principal, systemID string) (sy
 	return record, nil
 }
 
-func (store *stateStore) getSystem(ctx context.Context, principal, systemID string) (record systemRecord, err error) {
+func (store *Store) GetSystem(ctx context.Context, principal, systemID string) (record SystemRecord, err error) {
 	tx, err := store.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return record, err
@@ -608,7 +606,7 @@ func (store *stateStore) getSystem(ctx context.Context, principal, systemID stri
 	return readSystem(ctx, tx, principal, systemID)
 }
 
-func (store *stateStore) listSystems(ctx context.Context, principal, after string) (records []systemRecord, next string, err error) {
+func (store *Store) ListSystems(ctx context.Context, principal, after string) (records []SystemRecord, next string, err error) {
 	tx, err := store.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, "", err
@@ -634,7 +632,7 @@ func (store *stateStore) listSystems(ctx context.Context, principal, after strin
 		ids = ids[:20]
 		next = ids[len(ids)-1]
 	}
-	records = make([]systemRecord, 0, len(ids))
+	records = make([]SystemRecord, 0, len(ids))
 	for _, id := range ids {
 		record, err := readSystem(ctx, tx, principal, id)
 		if err != nil {
