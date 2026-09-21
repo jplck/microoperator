@@ -1,7 +1,7 @@
 # Microoperator: technical specification
 
 Target design contract and architecture rationale. A persistent control daemon,
-shared model broker, and reviewed single-turn sandboxed operator are implemented;
+shared model broker, scoped tool registry, and durable sandboxed agent teams are implemented;
 see [README.md](README.md)
 for commands, verified scope, and unresolved native confinement limitations.
 It is not yet approved for untrusted agent code.
@@ -76,10 +76,10 @@ affected work with a visible reason, never an implicit substitute.
 
 ### 2.2. Example configuration
 
-The versioned loader and single-turn model execution are implemented.
-The target-v1 example below includes built-in broker operations that milestone 2
-still rejects as unimplemented; use the [runnable daemon example](README.md#daemon)
-for the current slice. Replace the intentionally invalid endpoint/model before
+The versioned loader, model execution, and reviewed delegation operations are
+implemented. Use the [runnable daemon example](README.md#daemon) and
+[tool grants](README.md#scoped-tools-and-agent-teams) for the current supported
+subset. Replace the intentionally invalid endpoint/model before
 model execution; example quotas are not provider guarantees.
 
 ```json
@@ -289,6 +289,16 @@ that activation's pinned mapping, not a global bare-name lookup. Local entries
 cannot shadow shared/built-in IDs or resolve to another system's private entries.
 Catalog queries and source/artifact access obey the same scope checks.
 
+Milestone 3 provides the built-in catalog, JSON-owned shared skills, exact scoped
+pins, child-agent assignment revisions, live revocation, and inert local drafts.
+The reviewed `runtime.text.analyze` subprocess uses the task's selected profile,
+fixed arguments, a pinned runtime-binary digest, and bounded validated report
+ingestion. Its reports are at most 4096 bytes and stored in scoped SQLite rows;
+large/general artifacts retain the separate-storage target in section 6.
+Catalog access does not grant execution. Rebuilding the reviewed binary requires
+explicit reassignment through stopped-system revision, not silent pin replacement.
+Local source cannot yet be evaluated, approved, assigned, built, or executed.
+
 System-local proposals follow:
 
 ```text
@@ -320,8 +330,10 @@ files, memory, or credentials. Shared publication grants no system access by its
 ## 3. Worker lifecycle and brokers
 
 Use one executable with `daemon`, internal `sandbox-exec`/`sandbox-exec-profile`,
-and `worker operator` modes. Milestone 2's reviewed worker performs one model turn,
-not arbitrary generated code or a multi-turn tool loop. The phase-0 echo demo
+`worker operator`, and `tool text-analyze` modes. Each reviewed worker activation
+performs one model turn and relays at most one structured tool action; the daemon
+persists and schedules subsequent turns. This is not arbitrary generated code.
+The phase-0 echo demo
 remains removed. The daemon launches a fresh sandbox-exec child with a trusted
 profile and pinned executable.
 The child applies nono-go on a locked OS thread and immediately execs the target
@@ -426,6 +438,13 @@ fields; agent-provided labels cannot impersonate a sender or declassify data.
 > returned data. Wakeups must never execute agent code inside the daemon. Add denial
 > checks demonstrating these boundaries; nono alone does not enforce them.
 
+Milestone 4 implements addressed delegation, progress/results, and `user.input`.
+The recipient inherits the intersection of caller-task and recipient pins, cannot
+lend a different model or sandbox profile, and shares creation/delegation ancestor
+budgets. Component and real-process checks exercise this narrowed authority.
+The reminder still applies before any future privilege expansion, integration,
+generated execution, or richer message/subscription operation.
+
 Commit events and intended mailbox deliveries atomically in SQLite. Local delivery
 is at least once: deduplicate by event/recipient and correlate resulting actions.
 Task completion and resulting outbound events commit together. Acceptance means
@@ -460,6 +479,15 @@ Agent-to-agent communication uses only the durable event router, local mailboxes
 and sandboxed worker IPC in v1. Do not add per-agent network servers or external
 agent-protocol adapters. The user-facing API and provider/tool integrations do not
 create alternate peer communication paths.
+
+Current bounds are eight turns per task and per agent/goal, creation depth eight,
+64 tasks/goal, 256 events/goal, 4096 events/system, 64 outstanding deliveries per
+recipient, 32 source events per agent/minute, 8192-byte payloads, and causation depth
+16. Reserve terminal-reply capacity; delivery-limit failure explicitly rejects
+the waiting continuation instead of rolling back a known outcome or disabling
+the shared broker. Queued worker setup gets at most three delivery attempts with
+2/4-second backoff. Progress is durable inspection data, not a separate activation.
+Publish/subscribe, timers, memory notifications, and standing work remain milestone 5.
 
 ## 5. LLM admission and permissions
 
@@ -504,9 +532,10 @@ not an exact tokenizer or cost guarantee. Currency pricing is unsupported. Only
 explicit 429 rejections retry, at most three attempts, within the original activation
 deadline. Streams are bounded and buffered through terminal usage before delivery.
 Unknown outcomes retain their reservations; no automatic refund/reconciliation
-endpoint exists yet. A single active goal/operator per system makes system-level
-round-robin also goal-fair for this slice. Additional agents and multi-turn tools
-remain disabled.
+endpoint exists yet. A single active goal per system makes system-level round-robin
+also goal-fair. Descendant calls and tool continuations use the same admission
+path and atomically charge all applicable ancestor allowances. Executable-tool
+turns are non-streaming; ordinary model-only streams remain supported.
 
 An existing external gateway can be a configured provider endpoint when multiple
 applications share quotas. Keep local fairness and budgets; never bypass a failed
@@ -596,13 +625,20 @@ limits/usage, the scoped tool registry, messages, memory, schedules, artifacts,
 revisions, and approvals.
 Provide scoped snapshot queries and a resumable event stream with event IDs.
 The current authenticated local-administrator API creates, lists, inspects, and
-revises systems, starts/stops reviewed single-turn operators, and exposes durable
-model-call history and broker utilization. Its environment-supplied control token
+revises systems, starts bounded agent teams, and exposes registry/draft/assignment,
+task/event/artifact/tool-call inspection, durable input, and system/goal/agent
+pause/resume/stop. Model-call history and broker utilization remain available.
+Its environment-supplied control token
 is not a worker credential. See the [current API](README.md#control-api); browser
-access, arbitrary workers, generated code, and tool execution remain disabled.
-Milestone 2 requires stopping active work before revising grants. Unfinished work
-after a daemon restart becomes visibly failed/stopped, with uncertain dispatches
-retained for reconciliation rather than automatically resumed or replayed.
+access, arbitrary workers, and generated code remain disabled.
+System/operator grant revisions require stopped work. Child assignment creates
+a new revision for future tasks without rewriting running/waiting pins; revocation
+blocks pinned work too. SQLite schema 3 migrates existing state and resumes
+eligible durable queued work, including safe 429 retries, while paused work stays
+paused. Completed decisions and local receipts are reused without repeating effects.
+Uncertain model/subprocess dispatches fail visibly and remain recorded for
+reconciliation, never blind replay. Legacy schema-2 calls lack continuations and
+remain unrecoverable. Current event queries are cursor-paginated snapshots, not SSE.
 
 The complete target command set includes create/start/stop system, submit goal,
 send input, approve/reject, revise, revoke, pause/resume, and cancel.
@@ -652,6 +688,13 @@ finishes, not `stopped` merely because the command was accepted. Stopping preser
 memory, artifacts, and history; deletion is separate. Starting a stopped system
 creates a new goal/run under current grants, without replaying canceled work,
 reactivating old timers, or resetting consumed system budgets.
+
+The implemented scheduler uses one active goal/system, one activation/agent,
+per-system active-agent limits, and a global 64-activation ceiling. All descendants
+and continuations share the original goal deadline (shortest quota wait plus
+three 60-second provider allowances). Pause does not extend that deadline:
+expired input/work gets a visible dead-letter/terminal outcome, and a goal that
+finishes during pause becomes inactive. Longer-lived standing work is deferred.
 
 The UI owns no runtime state. Default to restricted local sockets for CLI/local
 clients and authenticated loopback access for the browser UI; loopback alone is

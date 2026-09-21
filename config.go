@@ -28,6 +28,7 @@ var (
 )
 
 type configuration struct {
+	runtimeDigest   string
 	SchemaVersion   int                       `json:"schema_version"`
 	DataDir         string                    `json:"data_dir"`
 	Providers       map[string]providerConfig `json:"providers"`
@@ -192,6 +193,14 @@ func loadConfiguration(filename string, lookupEnv func(string) (string, bool)) (
 		cfg.DataDir = filepath.Join(filepath.Dir(absolute), cfg.DataDir)
 	}
 	cfg.DataDir = filepath.Clean(cfg.DataDir)
+	executable, err := os.Executable()
+	if err != nil {
+		return cfg, err
+	}
+	cfg.runtimeDigest, err = executableDigest(executable)
+	if err != nil {
+		return cfg, fmt.Errorf("fingerprint reviewed executable: %w", err)
+	}
 	return cfg, nil
 }
 
@@ -297,7 +306,7 @@ func (cfg configuration) validate(lookupEnv func(string) (string, bool)) error {
 		}
 		field := "tools." + name
 		if tool.Kind != "skill" {
-			return invalid(field+".kind", "executable tools are not implemented at this milestone")
+			return invalid(field+".kind", "administrative executables are not enabled; use reviewed runtime tools or inert local drafts")
 		}
 		if tool.Version < 1 || tool.Version > 2147483647 {
 			return invalid(field+".version", "outside supported bounds")
@@ -310,7 +319,7 @@ func (cfg configuration) validate(lookupEnv func(string) (string, bool)) error {
 			return err
 		}
 		for _, dependency := range tool.RequiresTools {
-			if _, ok := cfg.Tools[dependency]; !ok {
+			if _, ok := cfg.tool(dependency); !ok {
 				return invalid(field+".requires_tools", "unknown dependency")
 			}
 		}
@@ -325,7 +334,8 @@ func (cfg configuration) validate(lookupEnv func(string) (string, bool)) error {
 			return nil
 		}
 		visiting[name] = true
-		for _, dependency := range cfg.Tools[name].RequiresTools {
+		tool, _ := cfg.tool(name)
+		for _, dependency := range tool.RequiresTools {
 			if err := visit(dependency, depth+1); err != nil {
 				return err
 			}
@@ -411,7 +421,7 @@ func (cfg configuration) validateSystem(system systemConfig) error {
 	}
 	granted := make(map[string]bool)
 	for _, name := range system.Tools {
-		if _, ok := cfg.Tools[name]; !ok {
+		if _, ok := cfg.tool(name); !ok {
 			return invalid("tools", "unknown or unimplemented tool")
 		}
 		granted[name] = true
@@ -428,7 +438,8 @@ func (cfg configuration) validateSystem(system systemConfig) error {
 	}
 	for _, grants := range []map[string]bool{granted, operator} {
 		for name := range grants {
-			for _, dependency := range cfg.Tools[name].RequiresTools {
+			tool, _ := cfg.tool(name)
+			for _, dependency := range tool.RequiresTools {
 				if !grants[dependency] {
 					return invalid("tools", "skill dependencies must already be granted at each scope")
 				}

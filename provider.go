@@ -26,33 +26,57 @@ const (
 )
 
 type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string          `json:"role"`
+	Content    string          `json:"content"`
+	ToolCalls  []modelToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string          `json:"tool_call_id,omitempty"`
 }
 
 func modelRequest(cfg configuration, record systemRecord, prompt string, stream bool) ([]byte, int64, error) {
+	return conversationRequest(cfg, record, []chatMessage{{Role: "user", Content: prompt}}, stream)
+}
+
+func conversationRequest(cfg configuration, record systemRecord, conversation []chatMessage, stream bool) ([]byte, int64, error) {
 	model, ok := cfg.Models[record.Grants.Model]
 	if !ok {
 		return nil, 0, invalid("model", "grant no longer exists")
 	}
-	messages := []chatMessage{{"system", record.Configuration.Operator.Prompt}}
+	messages := []chatMessage{{Role: "system", Content: record.Configuration.Operator.Prompt}}
+	var functions []modelFunction
 	for _, pin := range record.Grants.OperatorTools {
-		tool, ok := cfg.Tools[pin.Name]
-		if !ok || tool.Kind != "skill" {
-			return nil, 0, invalid("tools", "only pinned skill content is supported")
+		tool, ok := cfg.tool(pin.Name)
+		if !ok {
+			return nil, 0, invalid("tools", "pinned definition is unavailable")
 		}
-		messages = append(messages, chatMessage{"system", tool.Content})
+		if tool.Kind == "executable" {
+			function, err := executableSchema(pin.Name, tool)
+			if err != nil {
+				return nil, 0, err
+			}
+			functions = append(functions, function)
+			continue
+		}
+		messages = append(messages, chatMessage{Role: "system", Content: tool.Content})
 	}
-	messages = append(messages, chatMessage{"user", prompt})
+	if stream && len(functions) > 0 {
+		return nil, 0, invalid("stream", "streaming executable tool calls is not enabled; use non-streaming turns")
+	}
+	messages = append(messages, conversation...)
 	request := struct {
-		Model         string        `json:"model"`
-		Messages      []chatMessage `json:"messages"`
-		MaxTokens     int64         `json:"max_tokens"`
-		Stream        bool          `json:"stream"`
-		StreamOptions *struct {
+		Model             string          `json:"model"`
+		Messages          []chatMessage   `json:"messages"`
+		MaxTokens         int64           `json:"max_tokens"`
+		Stream            bool            `json:"stream"`
+		Tools             []modelFunction `json:"tools,omitempty"`
+		ParallelToolCalls *bool           `json:"parallel_tool_calls,omitempty"`
+		StreamOptions     *struct {
 			IncludeUsage bool `json:"include_usage"`
 		} `json:"stream_options,omitempty"`
-	}{Model: model.Model, Messages: messages, MaxTokens: model.MaxOutputTokens, Stream: stream}
+	}{Model: model.Model, Messages: messages, MaxTokens: model.MaxOutputTokens, Stream: stream, Tools: functions}
+	if len(functions) > 0 {
+		disabled := false
+		request.ParallelToolCalls = &disabled
+	}
 	if stream {
 		request.StreamOptions = &struct {
 			IncludeUsage bool `json:"include_usage"`
@@ -98,6 +122,7 @@ type providerResult struct {
 	Retry         bool
 	Cooldown      time.Time
 	RetryDelay    time.Duration
+	Actions       []modelToolCall
 }
 
 type chatUsage struct {
@@ -194,6 +219,7 @@ func requestModel(ctx context.Context, client *http.Client, provider providerCon
 		return unknown
 	}
 	var text string
+	var actions []modelToolCall
 	var usage *chatUsage
 	if stream {
 		text, usage, err = readChatStream(response.Body)
@@ -209,12 +235,56 @@ func requestModel(ctx context.Context, client *http.Client, provider providerCon
 		}
 		if err == nil {
 			if present(reply.Error) || len(reply.Choices) != 1 || reply.Choices[0].Index != 0 ||
-				reply.Choices[0].Message.Content == nil || present(reply.Choices[0].Message.ToolCalls) ||
 				present(reply.Choices[0].Message.FunctionCall) || reply.Choices[0].Finish == nil ||
-				(*reply.Choices[0].Finish != "stop" && *reply.Choices[0].Finish != "length") {
+				(*reply.Choices[0].Finish != "stop" && *reply.Choices[0].Finish != "length" && *reply.Choices[0].Finish != "tool_calls") {
 				err = errors.New("unsupported provider completion")
 			} else {
-				text, usage = *reply.Choices[0].Message.Content, reply.Usage
+				usage = reply.Usage
+				if reply.Choices[0].Message.Content != nil {
+					text = *reply.Choices[0].Message.Content
+				}
+				if *reply.Choices[0].Finish == "tool_calls" {
+					err = decodeProvider(reply.Choices[0].Message.ToolCalls, &actions)
+					var request struct {
+						Tools []modelFunction `json:"tools"`
+					}
+					if decodeErr := json.Unmarshal(body, &request); decodeErr != nil {
+						err = decodeErr
+					}
+					if len(actions) != 1 || len(request.Tools) == 0 {
+						err = errors.New("unrequested or parallel tool call")
+					} else {
+						a := &actions[0]
+						allowed := false
+						var selected functionSchema
+						for _, function := range request.Tools {
+							if function.Function.Name == a.Function.Name {
+								allowed = true
+								selected = function.Function
+							}
+						}
+						if !allowed || a.Type != "function" || !commandKeyPattern.MatchString(a.ID) || strings.Contains(a.ID, key) || len(a.Function.Arguments) > maxEventBytes {
+							err = errors.New("invalid model tool call")
+						}
+						var arguments map[string]any
+						if decodeErr := decodeJSON([]byte(a.Function.Arguments), &arguments); decodeErr != nil {
+							err = decodeErr
+						} else {
+							redactArgumentStrings(arguments, key)
+							encoded, encodeErr := json.Marshal(arguments)
+							if encodeErr != nil {
+								err = encodeErr
+							} else {
+								a.Function.Arguments = string(encoded)
+							}
+						}
+						if allowed && err == nil {
+							err = validateArguments(selected, a.Function.Arguments)
+						}
+					}
+				} else if present(reply.Choices[0].Message.ToolCalls) || reply.Choices[0].Message.Content == nil {
+					err = errors.New("invalid completion content")
+				}
 			}
 		}
 	}
@@ -230,7 +300,28 @@ func requestModel(ctx context.Context, client *http.Client, provider providerCon
 	if len(text) > maxModelText || checkFrame(message{Type: "model.result", ID: "call_" + strings.Repeat("0", 32), Data: text}) != nil {
 		return providerResult{Known: true, Input: *usage.Input, Output: *usage.Output, Reason: "encoded model output exceeds the worker response limit"}
 	}
-	return providerResult{Text: text, Input: *usage.Input, Output: *usage.Output, Known: true}
+	return providerResult{Text: text, Input: *usage.Input, Output: *usage.Output, Known: true, Actions: actions}
+}
+
+func redactArgumentStrings(value any, key string) {
+	switch value := value.(type) {
+	case map[string]any:
+		for name, item := range value {
+			if text, ok := item.(string); ok {
+				value[name] = strings.ReplaceAll(text, key, "[redacted]")
+			} else {
+				redactArgumentStrings(item, key)
+			}
+		}
+	case []any:
+		for i, item := range value {
+			if text, ok := item.(string); ok {
+				value[i] = strings.ReplaceAll(text, key, "[redacted]")
+			} else {
+				redactArgumentStrings(item, key)
+			}
+		}
+	}
 }
 
 // readChatStream consumes SSE through [DONE], including a separate usage chunk.

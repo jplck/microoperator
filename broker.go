@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"log"
 	"math"
@@ -184,6 +185,9 @@ func (b *modelBroker) perform(ctx context.Context, e executionRecord) providerRe
 		return providerResult{Known: true, Reason: "provider credential unavailable before request"}
 	}
 	body, _, err := modelRequest(b.cfg, record, e.Prompt, e.Stream)
+	if len(e.Request) > 0 {
+		body, err = e.Request, nil
+	}
 	if err != nil {
 		return providerResult{Known: true, Reason: "provider request rejected before sending"}
 	}
@@ -197,7 +201,7 @@ func (b *modelBroker) perform(ctx context.Context, e executionRecord) providerRe
 
 // admit is a single durable decision: grants, fair ordering, every shared quota,
 // and both budgets pass before any attempt is recorded or network request starts.
-// One operator/goal per system makes system round-robin also goal-fair in phase 2.
+// One active goal per system makes system round-robin also goal-fair.
 func (b *modelBroker) admit(ctx context.Context, session executionRecord, now time.Time) (result executionRecord, admitted bool, err error) {
 	tx, err := b.store.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -242,7 +246,7 @@ func (b *modelBroker) admit(ctx context.Context, session executionRecord, now ti
 		}
 		reason := ""
 		switch {
-		case record.State != "running":
+		case record.State != "running" && record.State != "paused":
 			reason = "system stopped or stopping"
 		case record.Revision != e.Revision || record.BlockedReason != "":
 			reason = "model grant revoked or administrative definitions changed"
@@ -250,6 +254,12 @@ func (b *modelBroker) admit(ctx context.Context, session executionRecord, now ti
 			reason = "queue deadline exceeded"
 		case e.Reservation > record.RemainingTokens || e.Reservation > e.GoalBudget-e.GoalUsed-e.GoalReserved:
 			reason = "budget exhausted"
+		}
+		if reason == "" {
+			reason, err = checkTaskAdmission(ctx, tx, b.cfg, e)
+			if err != nil {
+				return result, false, err
+			}
 		}
 		if reason != "" {
 			if err := terminalCall(ctx, tx, e, "rejected", reason); err != nil {
@@ -312,6 +322,9 @@ func (b *modelBroker) admit(ctx context.Context, session executionRecord, now ti
 			e.Reservation, e.SystemID, e.GoalID); err != nil {
 			return result, false, err
 		}
+		if err := chargeAgents(ctx, tx, e, e.Reservation, 0); err != nil {
+			return result, false, err
+		}
 		insert, err := tx.ExecContext(ctx, `INSERT INTO model_attempts(call_id,system_id,dispatched_at,reservation,state) VALUES(?,?,?,?,'running')`,
 			e.CallID, e.SystemID, dispatchAt, e.Reservation)
 		if err != nil {
@@ -365,6 +378,9 @@ func (b *modelBroker) settle(ctx context.Context, session executionRecord, p pro
 			state = "failed"
 		}
 		actual := p.Input + p.Output
+		if err := chargeAgents(ctx, tx, e, -e.Reservation, actual); err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, `UPDATE systems SET reserved_tokens=reserved_tokens-?,used_tokens=used_tokens+? WHERE system_id=?`,
 			e.Reservation, actual, e.SystemID); err != nil {
 			return err
@@ -421,9 +437,13 @@ func (b *modelBroker) settle(ctx context.Context, session executionRecord, p pro
 			}
 		}
 	}
+	actions, err := json.Marshal(p.Actions)
+	if err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE model_calls SET state=?,reason=?,response=?,input_tokens=input_tokens+?,
-	 output_tokens=output_tokens+?,usage_known=? WHERE call_id=?`,
-		state, p.Reason, p.Text, p.Input, p.Output, p.Known, e.CallID); err != nil {
+	 output_tokens=output_tokens+?,usage_known=?,actions=? WHERE call_id=?`,
+		state, p.Reason, p.Text, p.Input, p.Output, p.Known, actions, e.CallID); err != nil {
 		return err
 	}
 	if err := auditExecution(ctx, tx, e.SystemID, e.ActivationID, "model."+state, e.Revision, now); err != nil {

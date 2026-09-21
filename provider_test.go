@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -81,6 +82,51 @@ func TestProviderRejectsRedirectsAndRedactsSuccess(t *testing.T) {
 		[]byte("{}"), false, fixtureProviderSecret, time.Now(), 1)
 	if !result.Known || strings.Contains(result.Text, fixtureProviderSecret) || !strings.Contains(result.Text, "[redacted]") {
 		t.Fatalf("success credential handling: %+v", result)
+	}
+}
+
+func TestToolDecisionsValidateAndRedactBeforeWorkerDelivery(t *testing.T) {
+	tool, _ := builtinTool("runtime.text.analyze")
+	schema, err := executableSchema("runtime.text.analyze", tool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(map[string]any{"tools": []modelFunction{schema}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, id, args string
+		known          bool
+	}{
+		{"escaped credential", "action", `{"text":"\u0066ixture-secret"}`, true},
+		{"credential in id", "fixture-secret", `{"text":"safe"}`, false},
+		{"credential in field", "action", `{"text":"safe","fixture-secret":"value"}`, false},
+		{"invalid shape", "action", `{"text":{"nested":"fixture-secret"}}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			action := modelToolCall{ID: tc.id, Type: "function"}
+			action.Function.Name = schema.Function.Name
+			action.Function.Arguments = tc.args
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				data, err := json.Marshal(map[string]any{"choices": []any{map[string]any{"index": 0, "message": map[string]any{"content": nil, "tool_calls": []modelToolCall{action}}, "finish_reason": "tool_calls"}}, "usage": json.RawMessage(usageChunk)})
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				w.Write(data)
+			}))
+			defer server.Close()
+			client := providerClient()
+			defer client.CloseIdleConnections()
+			result := requestModel(context.Background(), client, providerConfig{BaseURL: server.URL}, modelConfig{MaxOutputTokens: 1024}, body, false, "fixture-secret", time.Now(), 1)
+			if result.Known != tc.known || strings.Contains(fmt.Sprint(result), "fixture-secret") {
+				t.Fatalf("unsafe action response: %+v", result)
+			}
+			if tc.known && (len(result.Actions) != 1 || !strings.Contains(result.Actions[0].Function.Arguments, "[redacted]")) {
+				t.Fatalf("escaped credential not redacted: %+v", result)
+			}
+		})
 	}
 }
 

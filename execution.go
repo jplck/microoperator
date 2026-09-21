@@ -5,6 +5,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -41,21 +42,44 @@ func operatorWorker(in io.Reader, out io.Writer) error {
 	if reply.ID != task.ID {
 		return errors.New("model response correlation mismatch")
 	}
-	if reply.Type == "model.error" {
+	switch reply.Type {
+	case "model.error":
 		if err := writeMessage(out, message{Type: "task.failed", ID: task.ID}); err != nil {
 			return err
 		}
 		return errors.New("model call failed")
-	}
-	if reply.Type != "model.result" {
+	case "model.action":
+		if err := writeMessage(out, message{Type: "tool.call", ID: task.ID, Data: reply.Data}); err != nil {
+			return err
+		}
+		result, err := readMessage(reader)
+		if err != nil {
+			return err
+		}
+		if result.ID != task.ID {
+			return errors.New("tool response correlation mismatch")
+		}
+		if result.Type == "tool.error" {
+			return errors.New("tool operation denied or failed")
+		}
+		kind := "task.continue"
+		if result.Type == "tool.wait" {
+			kind = "task.waiting"
+		} else if result.Type != "tool.result" {
+			return errors.New("invalid tool response")
+		}
+		return writeMessage(out, message{Type: kind, ID: task.ID})
+	case "model.result":
+		return writeMessage(out, message{Type: "task.complete", ID: task.ID})
+	default:
 		return errors.New("unexpected model response")
 	}
-	return writeMessage(out, message{Type: "task.complete", ID: task.ID})
 }
 
 type activation struct {
-	cancel context.CancelFunc
-	callID string
+	cancel                                     context.CancelFunc
+	callID                                     string
+	systemID, goalID, agentID, eventID, taskID string
 }
 
 type executionEngine struct {
@@ -69,6 +93,8 @@ type executionEngine struct {
 	cfg               configuration
 	broker            *modelBroker
 	logger            *log.Logger
+	wake              chan struct{}
+	schedulerDone     chan struct{}
 }
 
 func newExecutionEngine(ctx context.Context, store *stateStore, cfg configuration, logger *log.Logger) (*executionEngine, error) {
@@ -80,14 +106,17 @@ func newExecutionEngine(ctx context.Context, store *stateStore, cfg configuratio
 	if err != nil {
 		return nil, err
 	}
-	if err := store.recoverExecutions(ctx); err != nil {
-		return nil, err
-	}
 	child, cancel := context.WithCancel(ctx)
 	broker := newModelBroker(store, cfg, logger)
 	broker.lookup = os.LookupEnv
-	return &executionEngine{active: make(map[string]activation), ctx: child, cancel: cancel, owner: owner,
-		executable: executable, store: store, cfg: cfg, broker: broker, logger: logger}, nil
+	engine := &executionEngine{active: make(map[string]activation), ctx: child, cancel: cancel, owner: owner,
+		executable: executable, store: store, cfg: cfg, broker: broker, logger: logger, wake: make(chan struct{}, 1), schedulerDone: make(chan struct{})}
+	if err := store.recoverExecutions(ctx); err != nil {
+		cancel()
+		return nil, err
+	}
+	go engine.schedule()
+	return engine, nil
 }
 
 func (engine *executionEngine) close() {
@@ -97,6 +126,9 @@ func (engine *executionEngine) close() {
 		active.cancel()
 	}
 	engine.mu.Unlock()
+	if engine.schedulerDone != nil {
+		<-engine.schedulerDone
+	}
 	engine.wg.Wait()
 	engine.broker.client.CloseIdleConnections()
 }
@@ -114,25 +146,7 @@ func (engine *executionEngine) start(ctx context.Context, principal, key, id str
 	if err != nil {
 		return record, err
 	}
-	checkCtx, cancelCheck := context.WithTimeout(engine.ctx, 5*time.Second)
-	defer cancelCheck()
-	current, err := engine.store.getSystem(checkCtx, principal, id)
-	if err != nil {
-		return record, err
-	}
-	e := current.Execution
-	// Replayed control receipts describe the original result, not a fresh launch.
-	if e == nil || record.Execution == nil || e.CallID != record.Execution.CallID ||
-		e.State != "awaiting_worker" || e.ActivationOwner != engine.owner {
-		return record, nil
-	}
-	if _, exists := engine.active[id]; exists {
-		return record, nil
-	}
-	workerCtx, cancel := context.WithDeadline(engine.ctx, time.UnixMilli(e.Deadline))
-	engine.active[id] = activation{cancel: cancel, callID: e.CallID}
-	engine.wg.Add(1)
-	go engine.execute(workerCtx, current, *e)
+	engine.notify()
 	return record, nil
 }
 
@@ -144,9 +158,11 @@ func (engine *executionEngine) stop(ctx context.Context, principal, key, id stri
 	// A storage failure must not make emergency cancellation unavailable.
 	if err == nil || (!errors.Is(err, errSystemNotFound) && !errors.Is(err, errCommandConflict) && !errors.As(err, &field)) {
 		if principal == localAdministrator {
-			if active, ok := engine.active[id]; ok {
-				if err != nil || (record.State == "stopping" && record.Execution != nil && record.Execution.CallID == active.callID) {
-					active.cancel()
+			for key, active := range engine.active {
+				if active.systemID == id || (active.systemID == "" && key == id) {
+					if err != nil || ((record.State == "stopping" || record.State == "stopped") && record.Execution != nil && (active.goalID == record.Execution.GoalID || active.callID == record.Execution.CallID)) {
+						active.cancel()
+					}
 				}
 			}
 		}
@@ -160,8 +176,10 @@ func (engine *executionEngine) execute(ctx context.Context, record systemRecord,
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
 	wasCanceled := ctx.Err() != nil
-	engine.active[e.SystemID].cancel()
-	delete(engine.active, e.SystemID)
+	if active, ok := engine.active[e.AgentID]; ok {
+		active.cancel()
+		delete(engine.active, e.AgentID)
+	}
 	finishCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if finishErr := engine.finish(finishCtx, e, err, wasCanceled); finishErr != nil {
@@ -172,6 +190,7 @@ func (engine *executionEngine) execute(ctx context.Context, record systemRecord,
 	if err != nil {
 		engine.logger.Printf("system %s activation %s: %v", e.SystemID, e.ActivationID, err)
 	}
+	engine.notify()
 }
 
 func (engine *executionEngine) runActivation(ctx context.Context, record systemRecord, e executionRecord) (err error) {
@@ -219,6 +238,50 @@ func (engine *executionEngine) runActivation(ctx context.Context, record systemR
 				return err
 			}
 			reply := message{Type: "model.result", ID: e.CallID, Data: result.Response}
+			if len(result.Actions) == 1 {
+				data, err := json.Marshal(result.Actions[0])
+				if err != nil {
+					return err
+				}
+				if err := writeMessage(in, message{Type: "model.action", ID: e.CallID, Data: string(data)}); err != nil {
+					return err
+				}
+				request, err := readMessage(reader)
+				if err != nil {
+					return err
+				}
+				var action modelToolCall
+				if request.Type != "tool.call" || request.ID != e.CallID || decodeJSON([]byte(request.Data), &action) != nil {
+					return errors.New("invalid scoped tool invocation")
+				}
+				result.EventID = e.EventID
+				value, toolErr := engine.invokeTool(ctx, result, action)
+				responseType := "tool.result"
+				if toolErr != nil {
+					responseType, value = "tool.error", taskFailureReason(toolErr)
+				}
+				if toolErr == nil && action.Function.Name == wireToolName("runtime.task.delegate") {
+					responseType = "tool.wait"
+				}
+				if err := writeMessage(in, message{Type: responseType, ID: e.CallID, Data: value}); err != nil {
+					return errors.Join(toolErr, err)
+				}
+				if toolErr != nil {
+					return toolErr
+				}
+				ack, err := readMessage(reader)
+				if err != nil {
+					return err
+				}
+				expected := "task.continue"
+				if responseType == "tool.wait" {
+					expected = "task.waiting"
+				}
+				if ack != (message{Type: expected, ID: e.CallID}) {
+					return errors.New("invalid continuation acknowledgement")
+				}
+				return nil
+			}
 			if result.State != "completed" {
 				reply.Type, reply.Data = "model.error", result.Reason
 			}
@@ -240,54 +303,5 @@ func (engine *executionEngine) runActivation(ctx context.Context, record systemR
 }
 
 func (engine *executionEngine) finish(ctx context.Context, session executionRecord, workerErr error, canceled bool) (err error) {
-	tx, err := engine.store.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer rollback(tx, &err)
-	e, err := authorizeCall(ctx, tx, session)
-	if err != nil {
-		return err
-	}
-	var state string
-	if err := tx.QueryRowContext(ctx, `SELECT state FROM systems WHERE system_id=?`, e.SystemID).Scan(&state); err != nil {
-		return err
-	}
-	taskState := "failed"
-	switch {
-	case state == "stopping" || canceled:
-		taskState = "canceled"
-	case workerErr == nil && e.State == "completed":
-		taskState = "completed"
-	case e.State == "rejected":
-		taskState = "rejected"
-	}
-	if e.State == "awaiting_worker" || e.State == "queued" {
-		callState := "failed"
-		if taskState == "canceled" {
-			callState = "canceled"
-		}
-		if err := terminalCall(ctx, tx, e, callState, "activation ended before dispatch"); err != nil {
-			return err
-		}
-	}
-	if workerErr != nil && e.Reason == "" {
-		if _, err := tx.ExecContext(ctx, `UPDATE model_calls SET reason='worker failed before acknowledging task completion' WHERE call_id=?`, e.CallID); err != nil {
-			return err
-		}
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE goals SET state=? WHERE system_id=? AND goal_id=?`, taskState, e.SystemID, e.GoalID); err != nil {
-		return err
-	}
-	systemState := "inactive"
-	if state == "stopping" || canceled {
-		systemState = "stopped"
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE systems SET state=? WHERE system_id=?`, systemState, e.SystemID); err != nil {
-		return err
-	}
-	if err := auditExecution(ctx, tx, e.SystemID, e.ActivationID, "task."+taskState, e.Revision, time.Now()); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return engine.finishDelivery(ctx, session, workerErr, canceled)
 }

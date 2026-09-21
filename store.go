@@ -63,6 +63,7 @@ type systemRecord struct {
 	CreatedAt       string           `json:"created_at"`
 	BlockedReason   string           `json:"blocked_reason,omitempty"`
 	Execution       *executionRecord `json:"execution,omitempty"`
+	CommandResult   json.RawMessage  `json:"command_result,omitempty"`
 }
 
 type createSystemCommand struct {
@@ -247,7 +248,15 @@ func (store *stateStore) migrate(ctx context.Context) (err error) {
 		if _, err := tx.ExecContext(ctx, schemaV2); err != nil {
 			return fmt.Errorf("apply schema migration 2: %w", err)
 		}
+		fallthrough
 	case 2:
+		fallthrough
+	case 3:
+		if version < 3 {
+			if _, err := tx.ExecContext(ctx, schemaV3); err != nil {
+				return fmt.Errorf("apply schema migration 3: %w", err)
+			}
+		}
 	default:
 		return fmt.Errorf("unsupported database schema version %d", version)
 	}
@@ -309,7 +318,7 @@ func (cfg configuration) grantsFor(definition systemConfig) (systemGrants, error
 	tools := make(map[string]toolConfig)
 	pins := make(map[string]toolPin)
 	for _, name := range definition.Tools {
-		tool := cfg.Tools[name]
+		tool, _ := cfg.tool(name)
 		digest, _, err := jsonDigest(tool)
 		if err != nil {
 			return grants, err
@@ -475,7 +484,7 @@ func (store *stateStore) reviseSystem(ctx context.Context, principal, key, syste
 		if command.ExpectedRevision != record.Revision {
 			return record, errRevisionConflict
 		}
-		if record.State == "running" || record.State == "stopping" {
+		if record.State == "running" || record.State == "stopping" || record.State == "paused" {
 			return record, errExecutionConflict
 		}
 		if command.Configuration == nil {
@@ -491,6 +500,9 @@ func (store *stateStore) reviseSystem(ctx context.Context, principal, key, syste
 		record.Revision++
 		record.Grants, err = cfg.grantsFor(record.Configuration)
 		if err != nil {
+			return record, err
+		}
+		if err := authorizePins(ctx, tx, cfg, record.ID, record.Grants.SystemTools); err != nil {
 			return record, err
 		}
 		if err := insertRevision(ctx, tx, record, principal, "system.revise"); err != nil {

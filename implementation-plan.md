@@ -13,10 +13,10 @@ Do not scaffold every future package, table, or interface at once.
 | --- | --- | --- | --- |
 | 0. Worker-launch foundation | Implemented, not fully qualified | None | Sandbox launcher, framing, supervision, and real subprocess checks retained |
 | 1. Configuration and daemon state | Implemented, inactive systems only | 0 | Validated configuration and persistent system lifecycle |
-| 2. Model broker and one operator | Implemented, reviewed single-turn worker only | 1 | One prompt produces a tracked, rate-limited response |
-| 3. Scoped tool registry | Next | 1-2 | Granted shared tools/skills and system-local proposal records |
-| 4. Durable events and agent teams | Planned | 1-3 | Multiple systems self-organize through governed events |
-| 5. Memory and scheduled wakeups | Planned | 4 | Scoped retrieval, subscriptions, and persistent timers |
+| 2. Model broker and one operator | Implemented; extended by 3-4 | 1 | Tracked, rate-limited model turns |
+| 3. Scoped tool registry | Implemented, reviewed tools and inert drafts | 1-2 | Granted shared tools/skills and system-local proposal records |
+| 4. Durable events and agent teams | Implemented, bounded goal execution | 1-3 | Multiple systems self-organize through governed events |
+| 5. Memory and scheduled wakeups | Next | 4 | Scoped retrieval, subscriptions, and persistent timers |
 | 6. Detached control UI | Planned | 1-5 | Create, steer, inspect, pause/resume, and stop systems |
 | 7. Learning and generated tools | Planned, executable path gated | 3-6; S before untrusted build/run | Evaluated revisions and controlled tool promotion |
 | S. Sandbox and delegation qualification | Deferred; not satisfied by milestone 0 | 0, 3-4, and README prerequisites | Permission to enable untrusted execution, not another service |
@@ -85,8 +85,8 @@ strict JSON loading, private SQLite state with explicit migrations, immutable
 configuration/revision/grant snapshots, pending initial goals, audit records,
 durable command receipts, and an authenticated Unix-socket control API.
 Milestone 1 validated provider/skill metadata without stubbing execution. Milestone 2
-below now supplies model calls and pinned skill context; executable tools and future
-built-in delegation operations remain disabled.
+below supplies model calls and pinned skill context; milestones 3-4 add reviewed
+tools and delegation without enabling arbitrary executable definitions.
 
 Unit/component checks, vet, and race-enabled real-process integration checks passed
 on Linux/amd64 WSL2. Two instances were created, one revised, and both recovered
@@ -120,8 +120,8 @@ zero. Stop terminates the selected worker without affecting another system.
 
 **Implemented scope and evidence**
 
-[execution.go](execution.go) runs one reviewed, confined operator activation per
-system, with correlated private-pipe IPC and a durable goal/task/call identity.
+[execution.go](execution.go) supplies reviewed, confined operator activations,
+with correlated private-pipe IPC and a durable goal/task/call identity.
 [provider.go](provider.go) implements bounded Chat Completions and SSE consumption;
 credentials stay in the daemon, redirects/proxies are disabled, and model text is
 never interpreted as code or a tool call.
@@ -138,8 +138,8 @@ shared admission, throttling, cancellation, command replay, and graceful/abrupt
 restart. Unknown outcomes retain reservations; neither restart nor new goals refill
 lifetime budgets. Linux/amd64 WSL2 is the checked host; macOS has not been rerun.
 See [README.md](README.md#run-one-operator-goal) for commands, fixed bounds, usage
-estimates, and remaining qualification limits. This is not a multi-turn tool loop,
-currency-accounting implementation, or approval for generated/untrusted execution.
+estimates, and remaining qualification limits. Milestones 3-4 extend the original
+single-turn slice; currency accounting and generated/untrusted execution remain disabled.
 
 ## 3. Central registry and governed tool/skill use
 
@@ -162,6 +162,24 @@ drafts remain visible only in their owning system's authorized context. Missing
 dependencies, stale assignments, ID shadowing, and revoked versions fail explicitly.
 Registry presence alone never authorizes execution.
 
+**Implemented scope and evidence**
+
+[registry.go](registry.go), [runtime_api.go](runtime_api.go), and
+[team_ops.go](team_ops.go) supply one scoped catalog, pinned function schemas and
+skill context, immutable private drafts/provenance, explicit assignments, revocation,
+and receipts. `runtime.text.analyze` is fixed reviewed Go code, not a demo worker
+or an interpreter for proposed source. Its real subprocess uses the selected
+profile, a binary digest/fixed argument template, strict inputs/results, and
+bounded private artifact ingestion. Administrative executables remain unsupported.
+
+Component and Linux/amd64 WSL2 real-process scenarios cover granted versus denied
+tools/skills across systems, scoped artifacts/drafts, missing dependencies,
+forged/stale assignments, immutable revisions, ID shadowing, revoked delayed work,
+and narrower output permissions. The actual runtime binary is fingerprinted in
+the catalog and its tool pin. Agent revisions never rewrite existing task grants.
+Local drafts remain inert: evaluation, promotion, and generated execution are
+milestone 7/gate S, not implied by registration.
+
 ## 4. Durable events and self-organizing teams
 
 **Build**
@@ -182,6 +200,34 @@ responses. Delegation results wake the parent without blocking execution slots.
 Duplicate delivery, worker failure, daemon restart, grant revocation, and stopped
 systems cannot cause escalation, lost accepted input, or blind side-effect replay.
 All agent communication stays on the event/mailbox path.
+
+**Implemented scope and evidence**
+
+[team_store.go](team_store.go) migrates SQLite to schema 3, preserving prior
+receipts, calls, attempts, and reservations. [team.go](team.go) claims durable
+mailboxes through one scheduler; [team_ops.go](team_ops.go) commits proposals,
+delegation/continuations, tool receipts, and terminal replies transactionally.
+[controls.go](controls.go) and [runtime_api.go](runtime_api.go) provide scoped
+pause/resume/stop, attributed input, and bounded team/task/event/artifact inspection.
+One active goal/system and one activation/agent are enforced. A recipient cannot
+lend its broader tools, model, profile, or budget to a narrower task.
+
+Two real systems each run an operator and child with one active slot per system,
+ten total fake-provider calls, native text tools, and scoped reports. Results wake
+waiting parents without holding slots. Further component/real-process coverage
+checks duplicate delivery/command receipts, bounded pre-dispatch worker retries,
+unknown subprocess outcomes without replay, waiting-parent and applied-result
+recovery, paused input across daemon restart, all three control scopes, and stopping
+a waiting team without affecting another system. Model/ancestor/system accounting,
+event limits, terminal-delivery failure, and populated v1/v2 migration are covered.
+
+Default tests, vet, and race-enabled integration checks pass on Linux/amd64 WSL2,
+including race instrumentation in the actual daemon/worker/tool executable.
+macOS was not rerun. The [README bounds](README.md#follow-up-input-and-scoped-controls)
+are deliberate: eight turns, fixed fan-out/mailbox limits, non-streaming executable
+actions, and a goal lifetime that pause does not extend. Safe queued work/receipts
+resume; ambiguous effects and legacy non-resumable calls fail visibly.
+This does not qualify generated code, hard resource limits, or orphan cleanup.
 
 ## 5. Memory, subscriptions, and timers
 

@@ -239,6 +239,7 @@ func newControlHandler(store *stateStore, cfg configuration, configID, token str
 	mux.HandleFunc("POST /v1/systems/{system_id}/stop", api.stop)
 	mux.HandleFunc("GET /v1/model-broker", api.brokerStatus)
 	mux.HandleFunc("GET /v1/systems/{system_id}/model-calls", api.calls)
+	api.registerRuntimeRoutes(mux)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		api.failure(w, errSystemNotFound)
 	})

@@ -5,8 +5,8 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 )
@@ -106,48 +106,57 @@ type startSystemCommand struct {
 }
 
 type executionRecord struct {
-	CallID          string `json:"call_id"`
-	SystemID        string `json:"system_id"`
-	GoalID          string `json:"goal_id"`
-	TaskID          string `json:"task_id"`
-	ActivationID    string `json:"activation_id"`
-	ActivationOwner string `json:"-"`
-	Revision        int64  `json:"revision"`
-	Model           string `json:"model"`
-	Stream          bool   `json:"stream"`
-	State           string `json:"state"`
-	Reason          string `json:"reason,omitempty"`
-	Response        string `json:"response,omitempty"`
-	Reservation     int64  `json:"estimated_attempt_tokens"`
-	Attempts        int64  `json:"attempts"`
-	InputTokens     int64  `json:"input_tokens"`
-	OutputTokens    int64  `json:"output_tokens"`
-	UsageKnown      bool   `json:"usage_known"`
-	CreatedAt       int64  `json:"created_at_ms"`
-	QueuedAt        int64  `json:"queued_at_ms"`
-	Deadline        int64  `json:"deadline_ms"`
-	WaitDeadline    int64  `json:"wait_deadline_ms"`
-	DispatchedAt    int64  `json:"dispatched_at_ms"`
-	Prompt          string `json:"prompt"`
-	GoalBudget      int64  `json:"goal_token_budget"`
-	GoalUsed        int64  `json:"goal_used_tokens"`
-	GoalReserved    int64  `json:"goal_reserved_tokens"`
-	TaskState       string `json:"task_state"`
-	QueueWaitMs     int64  `json:"queue_wait_ms"`
-	Retries         int64  `json:"retries"`
+	CallID          string          `json:"call_id"`
+	SystemID        string          `json:"system_id"`
+	GoalID          string          `json:"goal_id"`
+	TaskID          string          `json:"task_id"`
+	ActivationID    string          `json:"activation_id"`
+	ActivationOwner string          `json:"-"`
+	Revision        int64           `json:"revision"`
+	Model           string          `json:"model"`
+	Stream          bool            `json:"stream"`
+	State           string          `json:"state"`
+	Reason          string          `json:"reason,omitempty"`
+	Response        string          `json:"response,omitempty"`
+	Reservation     int64           `json:"estimated_attempt_tokens"`
+	Attempts        int64           `json:"attempts"`
+	InputTokens     int64           `json:"input_tokens"`
+	OutputTokens    int64           `json:"output_tokens"`
+	UsageKnown      bool            `json:"usage_known"`
+	CreatedAt       int64           `json:"created_at_ms"`
+	QueuedAt        int64           `json:"queued_at_ms"`
+	Deadline        int64           `json:"deadline_ms"`
+	WaitDeadline    int64           `json:"wait_deadline_ms"`
+	DispatchedAt    int64           `json:"dispatched_at_ms"`
+	Prompt          string          `json:"prompt"`
+	GoalBudget      int64           `json:"goal_token_budget"`
+	GoalUsed        int64           `json:"goal_used_tokens"`
+	GoalReserved    int64           `json:"goal_reserved_tokens"`
+	TaskState       string          `json:"task_state"`
+	QueueWaitMs     int64           `json:"queue_wait_ms"`
+	Retries         int64           `json:"retries"`
+	AgentID         string          `json:"agent_id"`
+	Request         []byte          `json:"-"`
+	Actions         []modelToolCall `json:"tool_calls,omitempty"`
+	EventID         string          `json:"-"`
 }
 
 func readExecution(ctx context.Context, tx *sql.Tx, systemID, callID string) (e executionRecord, err error) {
+	var actions []byte
 	err = tx.QueryRowContext(ctx, `SELECT c.call_id,c.system_id,c.goal_id,c.task_id,c.activation_id,
 	 c.activation_owner,c.revision,c.model,c.stream,c.state,c.reason,c.response,c.reservation,
 	 c.attempts,c.input_tokens,c.output_tokens,c.usage_known,c.created_at,c.queued_at,c.deadline,
-	 c.wait_deadline,c.dispatched_at,g.prompt,g.token_budget,g.used_tokens,g.reserved_tokens,g.state,c.queue_wait_ms
+	 c.wait_deadline,c.dispatched_at,g.prompt,g.token_budget,g.used_tokens,g.reserved_tokens,
+	 COALESCE((SELECT state FROM tasks t WHERE t.system_id=c.system_id AND t.task_id=c.task_id),g.state),c.queue_wait_ms,c.agent_id,c.request,c.actions
 	 FROM model_calls c JOIN goals g ON g.system_id=c.system_id AND g.goal_id=c.goal_id
 	 WHERE c.system_id=? AND (?='' OR c.call_id=?) ORDER BY c.sequence DESC LIMIT 1`,
 		systemID, callID, callID).Scan(&e.CallID, &e.SystemID, &e.GoalID, &e.TaskID, &e.ActivationID,
 		&e.ActivationOwner, &e.Revision, &e.Model, &e.Stream, &e.State, &e.Reason, &e.Response, &e.Reservation,
 		&e.Attempts, &e.InputTokens, &e.OutputTokens, &e.UsageKnown, &e.CreatedAt, &e.QueuedAt, &e.Deadline,
-		&e.WaitDeadline, &e.DispatchedAt, &e.Prompt, &e.GoalBudget, &e.GoalUsed, &e.GoalReserved, &e.TaskState, &e.QueueWaitMs)
+		&e.WaitDeadline, &e.DispatchedAt, &e.Prompt, &e.GoalBudget, &e.GoalUsed, &e.GoalReserved, &e.TaskState, &e.QueueWaitMs, &e.AgentID, &e.Request, &actions)
+	if err == nil {
+		err = json.Unmarshal(actions, &e.Actions)
+	}
 	e.Retries = max(e.Attempts-1, 0)
 	return
 }
@@ -175,7 +184,7 @@ func (store *stateStore) startSystem(ctx context.Context, principal, key, system
 		if record.Revision != command.ExpectedRevision {
 			return record, errRevisionConflict
 		}
-		if record.State == "running" || record.State == "stopping" {
+		if record.State == "running" || record.State == "stopping" || record.State == "paused" {
 			return record, errExecutionConflict
 		}
 		record, err = cfg.inspect(record)
@@ -211,12 +220,15 @@ func (store *stateStore) startSystem(ctx context.Context, principal, key, system
 		if budget < 1 || budget > record.RemainingTokens {
 			return record, invalid("token_budget", "exhausted budget or goal cap exceeds remaining system allowance")
 		}
-		_, reservation, err := modelRequest(cfg, record, prompt, command.Stream)
+		body, reservation, err := modelRequest(cfg, record, prompt, command.Stream)
 		if err != nil {
 			return record, err
 		}
 		if reservation > budget {
 			return record, invalid("token_budget", "estimated input plus output cap cannot fit the goal budget")
+		}
+		if err := authorizePins(ctx, tx, cfg, systemID, record.Grants.OperatorTools); err != nil {
+			return record, err
 		}
 		wait := int64(3600)
 		model := cfg.Models[record.Grants.Model]
@@ -288,6 +300,16 @@ func (store *stateStore) startSystem(ctx context.Context, principal, key, system
 		if err := auditExecution(ctx, tx, systemID, principal, "system.start", record.Revision, now); err != nil {
 			return record, err
 		}
+		if _, err := tx.ExecContext(ctx, `UPDATE model_calls SET agent_id=?,request=? WHERE call_id=?`, record.OperatorID, body, callID); err != nil {
+			return record, err
+		}
+		e, err := readExecution(ctx, tx, systemID, callID)
+		if err != nil {
+			return record, err
+		}
+		if err := initializeRootTask(ctx, tx, record, e, now); err != nil {
+			return record, err
+		}
 		return readSystem(ctx, tx, principal, systemID)
 	})
 }
@@ -303,7 +325,7 @@ func (store *stateStore) stopSystem(ctx context.Context, principal, key, systemI
 			return record, err
 		}
 		state := "stopped"
-		if record.State == "running" || record.State == "stopping" {
+		if record.State == "running" || record.State == "stopping" || record.State == "paused" {
 			state = "stopping"
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE systems SET state=? WHERE system_id=?`, state, systemID); err != nil {
@@ -312,39 +334,17 @@ func (store *stateStore) stopSystem(ctx context.Context, principal, key, systemI
 		if _, err := tx.ExecContext(ctx, `UPDATE goals SET state='canceled' WHERE system_id=? AND state='pending'`, systemID); err != nil {
 			return record, err
 		}
+		if _, err := tx.ExecContext(ctx, `UPDATE goals SET control='stopped' WHERE system_id=? AND state IN ('queued','running','waiting')`, systemID); err != nil {
+			return record, err
+		}
+		if _, err := stopTasks(ctx, tx, systemID, "system", ""); err != nil {
+			return record, err
+		}
 		if err := auditExecution(ctx, tx, systemID, principal, "system.stop", record.Revision, now); err != nil {
 			return record, err
 		}
 		return readSystem(ctx, tx, principal, systemID)
 	})
-}
-
-// recoverExecutions runs under exclusive daemon ownership. Dispatched calls keep
-// their reservations: a dead connection cannot prove the provider billed nothing.
-// Never replay them, or reopen a terminal task merely because its worker vanished.
-func (store *stateStore) recoverExecutions(ctx context.Context) (err error) {
-	tx, err := store.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer rollback(tx, &err)
-	_, err = tx.ExecContext(ctx, `
-	 UPDATE model_attempts SET state='unknown' WHERE state='running';
-	 UPDATE model_calls SET state='unknown',reason='daemon restarted after dispatch; outcome requires reconciliation'
-	   WHERE state='running';
-	 UPDATE model_calls SET state='failed',reason='daemon restarted before dispatch; submit a new goal'
-	   WHERE state IN ('awaiting_worker','queued');
-	 UPDATE model_calls SET reason='daemon restarted before task acknowledgement'
-	   WHERE state='completed' AND goal_id IN (SELECT goal_id FROM goals WHERE state IN ('queued','running','waiting'));
-	 UPDATE goals SET state='failed' WHERE state IN ('queued','running','waiting');
-	 INSERT INTO audit(system_id,principal,action,revision,created_at)
-	   SELECT system_id,'runtime','execution.recover',revision,strftime('%Y-%m-%dT%H:%M:%fZ','now')
-	   FROM systems WHERE state IN ('running','stopping');
-	 UPDATE systems SET state='stopped' WHERE state IN ('running','stopping');`)
-	if err != nil {
-		return fmt.Errorf("recover executions: %w", err)
-	}
-	return tx.Commit()
 }
 
 func (store *stateStore) listCalls(ctx context.Context, principal, systemID string, after int64) (calls []executionRecord, next int64, err error) {

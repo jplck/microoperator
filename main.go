@@ -75,6 +75,11 @@ func run(ctx context.Context, args []string) error {
 			return errors.New(usage)
 		}
 		return operatorWorker(os.Stdin, os.Stdout)
+	case "tool":
+		if len(args) != 2 || args[1] != "text-analyze" {
+			return errors.New(usage)
+		}
+		return reviewedTextTool(os.Stdin, os.Stdout)
 	default:
 		return errors.New(usage)
 	}

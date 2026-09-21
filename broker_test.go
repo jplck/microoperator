@@ -244,7 +244,7 @@ func TestBrokerDenialsAndAtomicReservations(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 			result, err := b.call(ctx, e)
-			if err == nil && result.State != "rejected" {
+			if err == nil && result.State != "rejected" && result.State != "canceled" {
 				t.Fatalf("denied operation succeeded: %+v", result)
 			}
 			if count.Load() != 0 {
@@ -405,7 +405,11 @@ func TestBrokerThrottleRecoveryAndUnknownUsage(t *testing.T) {
 			}
 			b.store = reopened
 			after, err := reopened.getSystem(context.Background(), localAdministrator, e.SystemID)
-			if err != nil || after.ReservedTokens != before.ReservedTokens || after.State != "stopped" {
+			wantState := "running"
+			if unknown {
+				wantState = "stopped"
+			}
+			if err != nil || after.ReservedTokens != before.ReservedTokens || after.State != wantState {
 				t.Fatalf("restart replenished state: %+v %v", after, err)
 			}
 			next := queuedCall(t, b, id, "next")
@@ -498,7 +502,7 @@ func TestStoreMigrationFromPopulatedVersionOne(t *testing.T) {
 	if err := migrated.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if keys != 1 || version != 2 {
+	if keys != 1 || version != 3 {
 		t.Fatalf("migration enforcement/version = %d/%d", keys, version)
 	}
 	if _, err := migrated.db.Exec(`DELETE FROM audit`); err == nil {
@@ -510,6 +514,87 @@ func TestStoreMigrationFromPopulatedVersionOne(t *testing.T) {
 	replay, err := migrated.createSystem(context.Background(), localAdministrator, "legacy", createSystemCommand{"research", &goal}, cfg, id)
 	if err != nil || replay.ID != record.ID {
 		t.Fatalf("legacy receipt failed: %+v %v", replay, err)
+	}
+}
+
+func TestStoreMigrationPreservesPopulatedVersionTwo(t *testing.T) {
+	cfg := fixtureConfiguration(t)
+	if err := os.MkdirAll(cfg.DataDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	filename := filepath.Join(cfg.DataDir, "state.db")
+	file, err := os.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file.Close()
+	db, err := sql.Open("sqlite", filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(schemaV1); err != nil {
+		t.Fatal(err)
+	}
+	legacy := &stateStore{db: db}
+	id, err := legacy.rememberConfiguration(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goal := "legacy dispatched goal"
+	record, err := legacy.createSystem(context.Background(), localAdministrator, "legacy-v2", createSystemCommand{"research", &goal}, cfg, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(schemaV2); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UnixMilli()
+	if _, err := db.Exec(`UPDATE systems SET state='running',used_tokens=23,reserved_tokens=123 WHERE system_id=?;
+	 UPDATE goals SET state='running',used_tokens=23,reserved_tokens=123 WHERE system_id=?`, record.ID, record.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO model_calls(call_id,system_id,goal_id,task_id,activation_id,activation_owner,revision,model,stream,state,reservation,attempts,created_at,queued_at,deadline,wait_deadline)
+	 VALUES('legacy-call',?,?,'legacy-task','legacy-activation','legacy-owner',1,'default',0,'running',123,1,?,?,?,?)`,
+		record.ID, record.Goal.ID, now, now, now+60000, now+60000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO call_groups(call_id,system_id,group_name) VALUES('legacy-call',?,'account')`, record.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO model_attempts(call_id,system_id,dispatched_at,reservation,state) VALUES('legacy-call',?,?,123,'running')`, record.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO quota_state(group_name,credit,updated_at,cooldown_until) VALUES('account',0,?,?)`, now, now+30000); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := openStore(context.Background(), filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer migrated.db.Close()
+	if err := migrated.recoverExecutions(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := migrated.getSystem(context.Background(), localAdministrator, record.ID)
+	if err != nil || saved.State != "stopped" || saved.UsedTokens != 23 || saved.ReservedTokens != 123 || saved.Execution.State != "unknown" || saved.Execution.AgentID != record.OperatorID {
+		t.Fatalf("v2 accounting/history lost: %+v %v", saved, err)
+	}
+	for table, count := range map[string]int{"model_calls": 1, "model_attempts": 1, "call_groups": 1, "command_receipts": 1, "tasks": 0} {
+		assertCount(t, migrated, table, count)
+	}
+	var cooldown int64
+	if err := migrated.db.QueryRow(`SELECT cooldown_until FROM quota_state WHERE group_name='account'`).Scan(&cooldown); err != nil || cooldown != now+30000 {
+		t.Fatalf("cooldown lost: %d %v", cooldown, err)
+	}
+	replay, err := migrated.createSystem(context.Background(), localAdministrator, "legacy-v2", createSystemCommand{"research", &goal}, cfg, id)
+	if err != nil || replay.ID != record.ID {
+		t.Fatalf("legacy receipt lost: %+v %v", replay, err)
+	}
+	if _, err := migrated.db.Exec(`DELETE FROM audit`); err == nil {
+		t.Fatal("audit became mutable")
 	}
 }
 

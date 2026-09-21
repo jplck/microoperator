@@ -1,9 +1,11 @@
 # Microoperator
 
 A Go daemon with validated configuration, SQLite-backed systems, an authenticated
-local control API, and a shared model broker. A reviewed, nono-go-confined operator
-performs one model turn per explicitly started goal. Multi-turn tool execution,
-agent teams, scheduling, generated code, and the UI are not implemented yet.
+local control API, and a shared model broker. Reviewed, nono-go-confined workers
+run bounded tool-using turns and delegate to agents through durable mailboxes.
+Scoped tools/skills, inert local drafts, follow-up input, and system/goal/agent
+controls are implemented. Memory, schedules, generated-code execution, and the UI
+remain future milestones.
 
 **Not ready for untrusted agent code.** Hard resource limits and cleanup after
 supervisor death remain unqualified. The macOS profile also retains resolver IPC.
@@ -19,7 +21,7 @@ Linux architectures are rejected until separately verified.
 
 ### Daemon
 
-Milestone 2 adds explicit start/stop and OpenAI-compatible Chat Completions.
+The daemon supports explicit goals and OpenAI-compatible Chat Completions.
 Loading configuration and creating systems still do not start workers or make
 provider calls. Create a user-owned `microoperator.json`:
 
@@ -202,13 +204,13 @@ fit every referenced token quota. Agent counts satisfy
 be revised below consumed plus reserved usage. Stop an active system before revising
 its grants or configuration. Prompt/goal/skill content is capped at 32 KiB.
 
-This slice implements only `openai-chat-completions` and shared `skill` content.
-Pinned operator skills become system-message instructions, not callable tools.
-There is no active executable-tool registry. Executable tools and
-the future `runtime.agent.propose` / `runtime.task.delegate` operations are rejected
-rather than installed or stubbed. Profile validation and native support diagnostics
-are not permission to run untrusted code. Model calls are private worker operations,
-not a public arbitrary-prompt/provider proxy; no tool-call route exists.
+The provider adapter remains `openai-chat-completions`. Administrative `shared.*`
+definitions are skills; reviewed `runtime.*` executables are built into the daemon's
+registry. Pinned skills become system-message instructions, never permission grants.
+Arbitrary executables from configuration and generated source cannot run.
+Profile validation and native support diagnostics are not permission to run
+untrusted code. Model/tool calls use authenticated worker pipes, not a public
+arbitrary-prompt/provider or arbitrary-tool-invocation endpoint.
 
 ### Run one operator goal
 
@@ -244,12 +246,122 @@ and retains its concurrency slot until the stream closes. This is not yet a UI s
 After completion or cancellation, use a new idempotency key and a new `goal`:
 `{"expected_revision":1,"goal":"Explain the next topic.","token_budget":5000}`.
 The optional goal cap cannot expand the remaining system allowance. Restarting a
-system never replays its previous goal or replenishes lifetime budgets. Replaying
+system after stop never replays its previous goal or replenishes lifetime budgets. Replaying
 an old start/stop command cannot start or cancel a later activation.
 
-There is one operator activation per system, at most 64 across the daemon, with
-no descendants or executable tools. Task data crosses its private pipes only after
+There is one active goal per system and one active activation per agent, at most
+64 across the daemon, subject to each system's `max_active_agents`. Task data crosses private pipes only after
 sandbox readiness. Scope comes from that activation, not worker-supplied identities.
+
+### Scoped tools and agent teams
+
+To enable a team, explicitly put these IDs in **both** a launch configuration's
+`tools` and `operator.tools` arrays, and use a model that supports function calls:
+
+```json
+[
+  "runtime.agent.list",
+  "runtime.agent.propose",
+  "runtime.task.delegate",
+  "runtime.task.progress",
+  "runtime.tool.propose",
+  "runtime.text.analyze"
+]
+```
+
+Do not copy these entries into the top-level administrative `tools` map. Restart
+after editing configuration, then create a new instance or explicitly revise a
+stopped instance. Start with `stream:false` (the default): executable tool calls
+are currently non-streaming, with exactly one function action per model turn.
+Plain model text is never treated as code or as a function request.
+
+| Tool | Behavior |
+| --- | --- |
+| `runtime.agent.list` | Same-goal collaborators, availability, model/profile, and capability summaries; five per page with `after`/`next`. Shows up to 16 tool names plus the full `tool_count`; the administrator's agent view has full pins |
+| `runtime.agent.propose` | Creates a child with a name, prompt, subset of the current task's tools, and token cap; inherits model/profile; does not launch it |
+| `runtime.task.delegate` | Returns a task ID and persists a waiting continuation; the child runs through a mailbox, then its result wakes the parent |
+| `runtime.task.progress` | Records a bounded progress event for the parent; does not create another model turn by itself |
+| `runtime.tool.propose` | Stores a private, inert skill or Go-source draft with creator/goal/task provenance; never builds or activates it |
+| `runtime.text.analyze` | Reviewed sandboxed subprocess accepting `text` (up to 4096 bytes) and optional `save_artifact`; returns rune/word counts and an authorized artifact ID |
+
+For example, set the operator prompt to “Inspect the directory, propose a narrowly
+granted research assistant if needed, delegate text analysis to it, and summarize
+its result.” Model decisions remain model-dependent; the daemon validates each
+proposed action instead of interpreting arbitrary plans.
+
+Registry visibility is not a grant. Task pins include the version and definition
+digest; invocation and delayed delivery recheck availability and revocation.
+Delegation intersects caller task and recipient grants, disallows a different
+model/profile, and charges creation/delegation ancestors as well as the common
+goal and system. A waiting parent releases its execution slot, so a parent and child
+can run with `max_active_agents:1`.
+
+The text tool has fixed arguments and no shell, arbitrary file path, or network
+option. Its manifest exposes schemas, limits, and the runtime executable's SHA-256.
+Rebuilding that executable changes the tool pin: restart and explicitly revise
+affected stopped systems rather than silently using a new binary. Subprocesses
+use the task's selected profile; saving a report requires write access to `output`.
+Validated reports are at most 4096 bytes and stored with scope/digest in SQLite.
+This small-report path is not a general upload/artifact store.
+
+| Route | Result |
+| --- | --- |
+| `GET /v1/tools[/<tool_id>]` | Shared registry; no local drafts |
+| `GET /v1/systems/<system_id>/tools[/<tool_id>]` | Shared definitions/revocations and this system's private drafts |
+| `POST /v1/systems/<system_id>/tools/drafts` | `{kind,description,content,requires_tools}`; returns `command_result.tool_id`, always inert |
+| `POST /v1/systems/<system_id>/tools/<tool_id>/state` | `{version,state}`; only `rejected` or `disabled`, never activation/promotion |
+| `POST /v1/systems/<system_id>/tools/revoke` | `{name,version}`; blocks subsequent calls/deliveries and cancels affected activations |
+| `PUT /v1/systems/<system_id>/agents/<agent_id>/tools` | `{expected_revision,tools:[{name,version,digest}]}`; exact system-granted pins in a new child revision |
+| `GET /v1/systems/<system_id>/agents` | Agent definitions, full pins, revisions, state, and availability |
+| `GET /v1/systems/<system_id>/tasks` | Pinned tasks, continuation/wait state, outcomes, and denial reasons |
+| `GET /v1/systems/<system_id>/events` | Trusted envelopes, payloads, delivery status, retries, leases, and dead-letter reasons |
+| `GET /v1/systems/<system_id>/tool-calls` | Durable tool receipts/results, correlated with calls and tasks |
+| `GET /v1/systems/<system_id>/artifacts[/<artifact_id>]` | Scoped report metadata, or an individual validated report |
+
+Agent/task/event/tool-call/artifact lists return up to 20 entries; follow `next`
+using `?after=<next>`. Events use numeric sequence cursors; other lists use IDs.
+Use system configuration revisions for operator/system assignment. Child assignment
+does not rewrite running/waiting task pins; revocation still takes immediate effect.
+All mutations use the existing authenticated, transactional idempotency mechanism.
+Draft IDs are runtime-assigned `local.*` identifiers; they cannot shadow `shared.*`
+or `runtime.*`. Draft content is immutable; at most 64 drafts per system, with
+8192-byte content and 2048-byte descriptions. Missing dependencies are rejected;
+skills never auto-install or auto-grant them. Evaluation/promotion is deferred.
+
+### Follow-up input and scoped controls
+
+`POST /v1/systems/<system_id>/input` accepts
+`{"content":"Additional context","agent_id":"optional-addressed-agent-id"}`.
+Omit `agent_id` to address the operator's current task. The 202 response contains
+`command_result.event_id`; inspect events for delivery status. Input is limited to
+4096 bytes and is durable context, not authority. It is consumed at the next safe
+turn; a waiting parent's input follows its child's correlated result.
+
+Post `{}` with a new idempotency key to:
+
+- `/v1/systems/<system_id>/pause` or `/resume` (system `/stop` remains available).
+- `/v1/systems/<system_id>/goals/<goal_id>/pause`, `/resume`, or `/stop`.
+- `/v1/systems/<system_id>/agents/<agent_id>/pause`, `/resume`, or `/stop`.
+
+Pause lets already claimed work finish and prevents subsequent activations.
+Paused input survives restart; resume does not reactivate stopped work. Stop
+cancels the addressed task subtree, preserves history, and never targets another
+system. Stopping a root/goal waits in `stopping` until leased workers finish cleanup.
+A completed goal becomes inactive even if its final turn finished during a pause.
+Stopped systems reject input; start a new goal explicitly.
+
+Fixed bounds are eight model turns per task and per agent/goal, creation depth
+eight, 64 tasks per goal, 256 events per goal, 4096 lifetime events per system,
+64 outstanding deliveries per recipient, 32 source events per agent/minute,
+8192-byte event payloads, and causation depth 16. Terminal-reply capacity is reserved;
+if a result cannot be delivered, its waiting continuation fails explicitly.
+Source IDs, scope, classification, and correlation are daemon-stamped. Neither
+new agents nor restarts reset allowances.
+
+All turns share the original goal deadline (shortest quota wait plus three
+60-second provider allowances). **Pause does not extend this lifetime**; expired
+work/input receives a visible terminal/dead-letter outcome. This is bounded goal
+execution, not standing work or scheduled wakeups.
 
 ### Model accounting and recovery
 
@@ -267,7 +379,7 @@ to 1 MiB on the wire, 32 KiB of text, and the 64 KiB encoded worker frame.
 The adapter sends `max_tokens`, requests usage for streams, forbids redirects and
 environment proxies, and never bypasses a configured gateway.
 
-Goal/system budgets reserve atomically before dispatch and reconcile validated
+Agent/ancestor/goal/system budgets reserve atomically before dispatch and reconcile validated
 provider usage. `used_tokens` reports known usage; `reserved_tokens` includes
 in-flight and unresolved calls. Available budget subtracts both. Pricing is not
 configured, so currency accounting is explicitly unsupported, not reported as zero.
@@ -282,20 +394,28 @@ allowances. No timeout, disconnected stream, missing usage, or ambiguous provide
 failure is automatically replayed. Disable hidden gateway retries where possible;
 the daemon cannot observe or guarantee accounting for those external attempts.
 
-SQLite migrates existing version-1 state transactionally to version 2. On daemon
-restart, unfinished work becomes visibly failed/stopped, not automatically resumed.
-Dispatched outcomes become `unknown`, preserving reservations, rate state, and
-cooldowns. A durable completed response remains inspectable even if its worker
-never acknowledged completion. Unknown reservations are not automatically released;
-there is no reconciliation/refund endpoint yet. New goals require explicit starts.
+SQLite migrates version-1/2 state transactionally to version 3; JSON stays at
+`schema_version:1`. On restart, eligible queued work resumes, including safe
+explicit-429 retries, while paused work remains paused. Completed model/tool
+receipts are reused, not redispatched; committed delegation and accepted input
+survive a worker's missing acknowledgement. Pre-dispatch worker failures receive
+at most three delivery attempts with 2/4-second backoff. Leases and event/recipient
+deduplication prevent simultaneous activations and duplicate input application.
+
+Ambiguous dispatched model/subprocess outcomes become `unknown` and fail the
+affected task, preserving reservations, rate state, cooldowns, and receipts.
+There is no blind side-effect retry or automatic refund/reconciliation endpoint.
+Legacy version-2 unfinished goals have no continuation/mailbox and remain
+unrecoverable rather than being synthesized into new work. New goals require explicit starts.
 Storage/accounting failures disable new dispatch; emergency stop remains available.
 
 ### Sandbox launch infrastructure
 
 The phase-0 `run` demo and placeholder `worker` command have been removed.
 Running without arguments prints daemon usage instead of executing a demo.
-The real internal `worker operator` mode performs one correlated model call and
-acknowledges its result; it cannot interpret model output as code or tool requests.
+The real internal `worker operator` mode performs one correlated model turn,
+relays at most one structured function action for daemon validation, acknowledges
+the result/continuation, and exits. It never interprets model text as code.
 Simulated workloads remain confined to integration-test fixtures.
 
 The launcher applies the selected profile's workspace read/read-write directories
@@ -311,7 +431,7 @@ The daemon removes activation workspaces after normal completion/cancellation.
 Abrupt daemon death can leave workspace directories; full orphan/resource cleanup
 remains a qualification gap, not permission to execute untrusted programs.
 
-`sandbox-exec`, `sandbox-exec-profile`, and `worker operator` are internal modes,
+`sandbox-exec`, `sandbox-exec-profile`, `worker operator`, and `tool text-analyze` are internal modes,
 not general-purpose user commands.
 The launcher locks its OS thread, installs any platform restrictions, applies
 nono-go, and immediately execs the target on that thread. Errors abort launch;
@@ -345,6 +465,12 @@ after a crash, replay commands, rotate the control token, and revalidate removed
 definitions. Inactive-system scenarios still assert zero provider calls and no
 implicit workers. Operator scenarios assert fake-provider responses/usage, shared
 limits, streaming cancellation, targeted stop, idempotency, and abrupt recovery.
+Team scenarios run two operators and children with one active slot per system,
+native text subprocesses and scoped artifacts. Coverage includes tool/skill denial,
+confused-deputy prevention, immutable assignments/drafts, revocation, delivery
+deduplication/retries/limits, unknown effects, waiting-parent recovery, paused input
+across a real daemon restart, and stopping a waiting team without affecting another
+system. Version-1/2 migrations preserve prior receipts and accounting.
 The daemon acceptance checks ran on Linux/amd64 WSL2; macOS was not rerun.
 Sandbox checks cover filesystem denials, symlink escapes, TCP/UDP/ordinary Unix-connection
 denials, thread/descendant inheritance, environment and descriptor isolation,
