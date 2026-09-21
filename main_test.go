@@ -87,6 +87,7 @@ func TestBoundsAndLaunchValidation(t *testing.T) {
 	}
 	for _, args := range [][]string{
 		{"run", "-timeout", "0s"}, {"run", "unexpected"}, {"sandbox-exec"}, {"worker", "unexpected"}, {"unknown"},
+		{"daemon"}, {"daemon", "--config", ""}, {"daemon", "--config", "unused.json", "unexpected"},
 	} {
 		if err := run(context.Background(), args); err == nil {
 			t.Fatalf("invalid arguments accepted: %v", args)

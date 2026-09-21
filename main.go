@@ -44,6 +44,16 @@ func run(ctx context.Context, args []string) error {
 		args = []string{"run"}
 	}
 	switch args[0] {
+	case "daemon":
+		flags := flag.NewFlagSet("microoperator daemon", flag.ContinueOnError)
+		config := flags.String("config", "", "user-owned JSON configuration")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if flags.NArg() != 0 || *config == "" {
+			return errors.New("daemon requires --config PATH and no positional arguments")
+		}
+		return runDaemon(ctx, *config, os.Stdout, os.Stderr)
 	case "run":
 		flags := flag.NewFlagSet("microoperator run", flag.ContinueOnError)
 		timeout := flags.Duration("timeout", 5*time.Second, "worker lifetime limit")
@@ -68,7 +78,7 @@ func run(ctx context.Context, args []string) error {
 		}
 		return worker(os.Stdin, os.Stdout)
 	default:
-		return errors.New("usage: microoperator run [-timeout 5s] [-message ping]")
+		return errors.New("usage: microoperator daemon --config PATH | run [-timeout 5s] [-message ping]")
 	}
 }
 

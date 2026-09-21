@@ -12,8 +12,8 @@ Do not scaffold every future package, table, or interface at once.
 | Milestone | Status | Depends on | Result |
 | --- | --- | --- | --- |
 | 0. Worker-launch spike | Implemented, diagnostic only | None | Confined ping/pong, supervision, and real subprocess checks |
-| 1. Configuration and daemon state | Next | 0 | Validated configuration and persistent system lifecycle |
-| 2. Model broker and one operator | Planned | 1 | One prompt produces a tracked, rate-limited response |
+| 1. Configuration and daemon state | Implemented, inactive systems only | 0 | Validated configuration and persistent system lifecycle |
+| 2. Model broker and one operator | Next | 1 | One prompt produces a tracked, rate-limited response |
 | 3. Scoped tool registry | Planned | 1-2 | Granted shared tools/skills and system-local proposal records |
 | 4. Durable events and agent teams | Planned | 1-3 | Multiple systems self-organize through governed events |
 | 5. Memory and scheduled wakeups | Planned | 4 | Scoped retrieval, subscriptions, and persistent timers |
@@ -76,6 +76,24 @@ daemon. IDs, configuration, grants, and state remain distinct and unchanged.
 Invalid configuration or unavailable required credentials prevents readiness;
 error/inspection responses contain no secrets. No worker or model call starts
 merely because a configuration is declared.
+
+**Implemented scope and evidence**
+
+[config.go](config.go), [store.go](store.go), and [daemon.go](daemon.go) implement
+strict JSON loading, private SQLite state with explicit migrations, immutable
+configuration/revision/grant snapshots, pending initial goals, audit records,
+durable command receipts, and an authenticated Unix-socket control API.
+The OpenAI-compatible provider shape and shared skills are validated as metadata;
+model calls, executable tools, and future built-in broker operations are not stubbed.
+
+Unit/component checks, vet, and race-enabled real-process integration checks passed
+on Linux/amd64 WSL2. Two instances were created, one revised, and both recovered
+unchanged across graceful and abrupt daemon restarts. Checks cover authorization,
+credential/configuration startup failures, concurrent/stale revisions, transactional
+rollback, immutable snapshots, durable retries, token rotation, and removed
+administrative definitions. A fake provider observed zero calls; configuration
+declarations and system creation started no workers. macOS was not rerun.
+See [README.md](README.md#daemon) for runnable configuration and commands.
 
 ## 2. Model broker and a single operator
 

@@ -1,8 +1,9 @@
 # Microoperator: technical specification
 
 Target design contract and architecture rationale. A diagnostic worker-launch
-spike is implemented; see [README.md](README.md) for commands, verified scope, and
-unresolved native confinement limitations. It is not yet approved for untrusted agent code.
+spike and inactive-system control daemon are implemented; see [README.md](README.md)
+for commands, verified scope, and unresolved native confinement limitations.
+It is not yet approved for untrusted agent code.
 See [implementation-plan.md](implementation-plan.md) for milestone status,
 dependencies, and acceptance checks. Diagnostic success is not qualification.
 "Must" denotes an implementation requirement, not a claim of completed functionality.
@@ -74,8 +75,11 @@ affected work with a visible reason, never an implicit substitute.
 
 ### 2.2. Example configuration
 
-This is the intended v1 shape, not an implemented loader. Replace the intentionally
-invalid endpoint/model below; example quotas are not provider guarantees.
+The versioned loader is implemented for inactive configuration/state management.
+The target-v1 example below includes built-in broker operations that milestone 1
+still rejects as unimplemented; use the [runnable daemon example](README.md#daemon)
+for the current slice. Replace the intentionally invalid endpoint/model before
+future model execution; example quotas are not provider guarantees.
 
 ```json
 {
@@ -576,8 +580,14 @@ Expose an authenticated versioned API for systems, goals, agents, tasks, grants,
 limits/usage, the scoped tool registry, messages, memory, schedules, artifacts,
 revisions, and approvals.
 Provide scoped snapshot queries and a resumable event stream with event IDs.
-Commands include create/start/stop system, submit goal, send input, approve/reject,
-revise, revoke, pause/resume, and cancel. Retried UI commands use idempotency keys
+Milestone 1 exposes only the authenticated local-administrator API for inactive
+creation, listing, inspection, and revision, with an optional pending initial goal.
+Its environment-supplied control token is not a worker credential. See the
+[current API](README.md#control-api); execution and browser access remain disabled.
+
+The complete target command set includes create/start/stop system, submit goal,
+send input, approve/reject, revise, revoke, pause/resume, and cancel.
+Retried UI commands use idempotency keys
 so a double click or reconnect cannot create duplicate systems, runs, or inputs.
 
 The UI is an optional, separate Go client/server with server-rendered forms and

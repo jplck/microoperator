@@ -1,0 +1,3 @@
+# Local administrative configuration and private daemon state.
+/microoperator.json
+/state/
