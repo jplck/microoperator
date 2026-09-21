@@ -15,7 +15,7 @@ import (
 // which are other ways processes can communicate outside our stdin/stdout pipes.
 // These calls only add rules to caps; the later nono.Apply installs the profile.
 //
-// This preserves the existing diagnostic profile, including its known limitation:
+// This preserves the existing sandbox profile, including its known limitation:
 // the pinned native core adds a resolver allowance that these extra deny rules do
 // not override. This function therefore does not establish strict macOS isolation.
 func configurePlatformSandbox(caps *nono.CapabilitySet) error {

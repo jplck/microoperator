@@ -1,7 +1,7 @@
 # Microoperator: technical specification
 
-Target design contract and architecture rationale. A diagnostic worker-launch
-spike and inactive-system control daemon are implemented; see [README.md](README.md)
+Target design contract and architecture rationale. An inactive-system control
+daemon and sandbox launch infrastructure are implemented; see [README.md](README.md)
 for commands, verified scope, and unresolved native confinement limitations.
 It is not yet approved for untrusted agent code.
 See [implementation-plan.md](implementation-plan.md) for milestone status,
@@ -318,8 +318,10 @@ files, memory, or credentials. Shared publication grants no system access by its
 
 ## 3. Worker lifecycle and brokers
 
-Use one executable with `daemon`, `sandbox-exec`, and `worker` modes. The daemon
-launches a fresh sandbox-exec child with a trusted profile and pinned executable.
+Use one executable with `daemon` and internal `sandbox-exec` modes. The target
+runtime adds a real `worker` mode with the model broker; milestone 1 ships no
+placeholder worker or demo command. The daemon launches a fresh sandbox-exec child
+with a trusted profile and pinned executable.
 The child applies nono-go on a locked OS thread and immediately execs the target
 on that thread, without unlocking or running agent logic in between. Never call
 irreversible `nono.Apply` in the daemon. Reuse this launch path for operators,
@@ -816,7 +818,7 @@ Upstream nono v0.78.0 documentation is comparison material, not evidence of bind
 feature parity. The binding requires Go 1.24+ and a C toolchain and supplies native
 libraries for Linux/macOS on amd64/arm64; this is not a claim of Microoperator
 support on those targets. Pin a compatible project toolchain and native artifacts.
-The [README](README.md) owns the diagnostic target and known qualification blockers.
+The [README](README.md) owns verified platform scope and known qualification blockers.
 
 | Topic | Primary source |
 | --- | --- |

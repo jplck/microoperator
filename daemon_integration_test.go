@@ -39,7 +39,7 @@ func startDaemonFixture(t *testing.T, filename, token string) *daemonFixture {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	fixture := &daemonFixture{cancel: cancel, done: make(chan struct{})}
-	fixture.cmd = exec.CommandContext(ctx, spikeBinary, "daemon", "--config", filename)
+	fixture.cmd = exec.CommandContext(ctx, microoperatorBinary, "daemon", "--config", filename)
 	fixture.cmd.Env = []string{"LANG=C", "TZ=UTC", controlTokenEnv + "=" + token, fixtureProviderEnv + "=" + fixtureProviderSecret}
 	fixture.cmd.Stderr = &fixture.stderr
 	fixture.cmd.WaitDelay = time.Second
@@ -282,6 +282,34 @@ func TestDaemonSystemsSurviveRestartWithoutExecution(t *testing.T) {
 	}
 }
 
+func TestRetiredDemoCommandsAreRejected(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"no arguments", nil},
+		{"run command", []string{"run"}},
+		{"run flags", []string{"run", "-message", "legacy"}},
+		{"placeholder worker", []string{"worker"}},
+		{"test-only fixture", []string{"-sandbox-probe=pipe"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, microoperatorBinary, tc.args...)
+			cmd.Env = workerEnv(workspace(t))
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			err := cmd.Run()
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || stdout.Len() != 0 ||
+				stderr.String() != "usage: microoperator daemon --config PATH\n" {
+				t.Fatalf("retired entry point: err=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
 func TestDaemonStartupDenialsAndExclusiveOwnership(t *testing.T) {
 	root := workspace(t)
 	cfg := fixtureConfiguration(t)
@@ -292,7 +320,7 @@ func TestDaemonStartupDenialsAndExclusiveOwnership(t *testing.T) {
 		t.Helper()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, spikeBinary, "daemon", "--config", filename)
+		cmd := exec.CommandContext(ctx, microoperatorBinary, "daemon", "--config", filename)
 		cmd.Env = append([]string{"LANG=C", "TZ=UTC"}, env...)
 		output, err := cmd.CombinedOutput()
 		if err == nil || !bytes.Contains(output, []byte(want)) || bytes.Contains(output, []byte(`"type":"ready"`)) ||

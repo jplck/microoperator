@@ -1,7 +1,7 @@
 # Microoperator
 
 A Go daemon with validated configuration, SQLite-backed inactive systems, and an
-authenticated local control API, plus the diagnostic nono-go worker-launch spike.
+authenticated local control API, with nono-go sandbox launch infrastructure.
 The model broker, agent execution loop, active tool registry, scheduler, and UI
 are not implemented yet.
 
@@ -14,7 +14,7 @@ filter; this closes the observed Unix-socket gap, not the entire qualification g
 
 Requires macOS or Linux/amd64, Go 1.24+, cgo, and a C compiler. Linux also requires
 working Landlock and seccomp, `/lib`, `/lib64`, `/usr/lib`, and `/etc/ld.so.cache`.
-Diagnostic profiles have been checked on macOS/arm64 and Linux/amd64 WSL2; other
+Sandbox profiles have been exercised on macOS/arm64 and Linux/amd64 WSL2; other
 Linux architectures are rejected until separately verified.
 
 ### Daemon
@@ -200,29 +200,24 @@ the future `runtime.agent.propose` / `runtime.task.delegate` operations are reje
 rather than installed or stubbed. Profile validation and native support diagnostics
 are not permission to run untrusted code. No start, model-call, or tool-call route exists.
 
-### Worker-launch diagnostic
+### Sandbox launch infrastructure
 
-```sh
-CGO_ENABLED=1 go run . run -message hello -timeout 5s
-```
+The phase-0 `run` demo and placeholder `worker` command have been removed.
+Running without arguments prints daemon usage instead of executing a demo.
+Real agent execution will be added with the model broker; the only simulated
+workloads now live in integration-test fixtures, not the production executable.
 
-The parent prints a diagnostic warning to stderr, creates a temporary private
-workspace, starts a confined worker, waits for readiness, and exchanges one JSON
-ping/pong over inherited pipes. Successful stdout:
-
-```json
-{"type":"pong","data":"hello"}
-```
-
-The worker gets read-only `inputs`, writable `scratch`/`output`, the executable,
-and required system library/device access. Its environment contains only private
-`HOME`/`TMPDIR`, `LANG`, and `TZ`; unrelated descriptors are marked close-on-exec.
+The retained launcher grants read-only `inputs`, writable `scratch`/`output`, the
+target executable, and required system library/device access. The target environment
+contains only private `HOME`/`TMPDIR`, `LANG`, and `TZ`; unrelated descriptors are
+marked close-on-exec.
 Sockets are rejected on standard descriptors too, so inherited connections cannot
 replace the approved pipes.
 Frames and captured stderr are capped at 64 KiB. Deadline or cancellation kills
-the worker process group; the parent waits and removes its temporary workspace.
+the supervised process group, and the supervisor waits for its direct child.
+Integration fixtures own their temporary workspace cleanup.
 
-`sandbox-exec` and `worker` are internal modes, not general-purpose user commands.
+`sandbox-exec` is an internal launch mode, not a general-purpose user command.
 The launcher locks its OS thread, installs any platform restrictions, applies
 nono-go, and immediately execs the target on that thread. Errors abort launch;
 there is no unsandboxed fallback. On Linux/amd64, the extra seccomp filter denies
@@ -244,6 +239,9 @@ Default tests cover framing, strict configuration, real temporary SQLite
 transactions/migrations, authorization, immutable revisions, pinned grants,
 duplicate/concurrent commands, rollback, cancellation, and output bounds.
 Integration tests build the real executable and use disposable processes and fixtures.
+The sandbox target is the integration-test binary with narrowly defined probe
+operations; these flags and operations are absent from normal builds. CLI
+regressions ensure retired demo commands cannot silently return.
 Daemon checks create two independent systems, revise one, restart gracefully and
 after a crash, replay commands, rotate the control token, and revalidate removed
 definitions. They assert zero requests to a fake provider and no implicit workers.
@@ -281,7 +279,7 @@ native core commit `1d1c88c9f98f0a1f3ff79cff1509713aaec7cdb0` (0.65.1).
 | --- | --- |
 | Default tests and `go vet` | Passed on this host |
 | Application integration suite, including race detection | Passed with the Linux launcher and supplemental seccomp filter |
-| Diagnostic launch | Returned `{"type":"pong","data":"hello"}` over the existing pipes |
+| Confined pipe communication | Integration-only target exchanged bounded messages through the retained launcher |
 | Binding support diagnostics | `IsSupported()` is true; `SupportInfo()` reports Landlock V3, with filesystem controls but no Landlock TCP or signal/abstract-socket scoping |
 | Filesystem fixtures through the launcher | Granted reads/writes succeeded; protected reads/writes and symlink escapes denied |
 | IPv4 TCP/UDP and pathname/abstract Unix sockets through the launcher | Denied, including Unix listeners outside the workspace |

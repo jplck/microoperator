@@ -26,9 +26,9 @@ import (
 )
 
 var (
-	probeMode   = flag.String("spike-probe", "", "internal confined test operation")
-	probeValue  = flag.String("spike-value", "", "internal test fixture")
-	spikeBinary string
+	probeMode           = flag.String("sandbox-probe", "", "internal confined test operation")
+	probeValue          = flag.String("sandbox-value", "", "internal test fixture")
+	microoperatorBinary string
 )
 
 func TestMain(m *testing.M) { os.Exit(integrationMain(m)) }
@@ -57,12 +57,12 @@ func integrationMain(m *testing.M) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	spikeBinary = filepath.Join(root, "microoperator")
+	microoperatorBinary = filepath.Join(root, "microoperator")
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "go", "build", "-o", spikeBinary, ".")
+	cmd := exec.CommandContext(ctx, "go", "build", "-o", microoperatorBinary, ".")
 	if output, err := cmd.CombinedOutput(); err != nil {
-		fmt.Fprintf(os.Stderr, "build spike: %v\n%s", err, output)
+		fmt.Fprintf(os.Stderr, "build runtime: %v\n%s", err, output)
 		return 1
 	}
 	fmt.Printf("sandbox integration: %s/%s, nono FFI reports %s\n", runtime.GOOS, runtime.GOARCH, nono.Version())
@@ -101,7 +101,7 @@ func exchange(in io.Writer, out io.Reader) (message, error) {
 	if ready.Type != "ready" {
 		return message{}, fmt.Errorf("unexpected readiness %+v", ready)
 	}
-	if err := writeMessage(in, message{Type: "ping", Data: "hello"}); err != nil {
+	if err := writeMessage(in, message{Type: "probe"}); err != nil {
 		return message{}, err
 	}
 	return readMessage(reader)
@@ -116,8 +116,8 @@ func confinedProbe(t *testing.T, root, mode, value string) message {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var reply message
-	err = supervise(ctx, spikeBinary, root, target,
-		[]string{"-spike-probe=" + mode, "-spike-value=" + value},
+	err = supervise(ctx, microoperatorBinary, root, target,
+		[]string{"-sandbox-probe=" + mode, "-sandbox-value=" + value},
 		func(in io.Writer, out io.Reader) error {
 			var err error
 			reply, err = exchange(in, out)
@@ -258,10 +258,15 @@ func TestSandboxBoundary(t *testing.T) {
 }
 
 func TestLaunchFailureDoesNotRunWorker(t *testing.T) {
+	fixture, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, mode := range []string{"missing inputs", "symlinked inputs", "nested launch"} {
 		t.Run(mode, func(t *testing.T) {
 			root := workspace(t)
-			args := []string{"worker"}
+			target := fixture
+			args := []string{"-sandbox-probe=pipe"}
 			want := "resolve inputs"
 			switch mode {
 			case "missing inputs":
@@ -277,13 +282,14 @@ func TestLaunchFailureDoesNotRunWorker(t *testing.T) {
 				}
 				want = "must not be a symlink"
 			case "nested launch":
-				args = []string{"sandbox-exec", root, spikeBinary, "worker"}
+				target = microoperatorBinary
+				args = []string{"sandbox-exec", root, microoperatorBinary, "daemon", "--config", filepath.Join(root, "inputs", "unused.json")}
 				want = "enumerate inherited descriptors"
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			var reply message
-			err := supervise(ctx, spikeBinary, root, spikeBinary, args,
+			err := supervise(ctx, microoperatorBinary, root, target, args,
 				func(in io.Writer, out io.Reader) error {
 					var err error
 					reply, err = exchange(in, out)
@@ -332,10 +338,10 @@ func TestInheritedDescriptorIsClosed(t *testing.T) {
 		t.Run(tc.mode, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			cmd := exec.CommandContext(ctx, spikeBinary, "sandbox-exec", root, target, "-spike-probe="+tc.mode)
+			cmd := exec.CommandContext(ctx, microoperatorBinary, "sandbox-exec", root, target, "-sandbox-probe="+tc.mode)
 			cmd.Env, cmd.Dir = workerEnv(root), root
 			cmd.ExtraFiles = []*os.File{tc.file}
-			cmd.Stdin = strings.NewReader("{\"type\":\"ping\"}\n")
+			cmd.Stdin = strings.NewReader("{\"type\":\"probe\"}\n")
 			output, err := cmd.Output()
 			if err != nil {
 				t.Fatal(err)
@@ -369,7 +375,11 @@ func TestSocketStandardInputIsRejected(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	root := workspace(t)
-	cmd := exec.CommandContext(ctx, spikeBinary, "sandbox-exec", root, spikeBinary, "worker")
+	target, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.CommandContext(ctx, microoperatorBinary, "sandbox-exec", root, target, "-sandbox-probe=pipe")
 	cmd.Env, cmd.Dir, cmd.Stdin = workerEnv(root), root, socket
 	output, err := cmd.Output()
 	var exitErr *exec.ExitError
@@ -379,14 +389,18 @@ func TestSocketStandardInputIsRejected(t *testing.T) {
 	}
 }
 
-func TestWorkerDeadlineAndCancellation(t *testing.T) {
-	t.Run("real worker ping", func(t *testing.T) {
+func TestSandboxSupervision(t *testing.T) {
+	target, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("pipe communication", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		err := supervise(ctx, spikeBinary, workspace(t), spikeBinary, []string{"worker"},
+		err := supervise(ctx, microoperatorBinary, workspace(t), target, []string{"-sandbox-probe=pipe"},
 			func(in io.Writer, out io.Reader) error {
 				reply, err := exchange(in, out)
-				if err == nil && reply != (message{Type: "pong", Data: "hello"}) {
+				if err == nil && reply != (message{Type: "result", Data: "complete"}) {
 					err = fmt.Errorf("unexpected reply %+v", reply)
 				}
 				return err
@@ -399,7 +413,7 @@ func TestWorkerDeadlineAndCancellation(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		readySeen := false
-		err := supervise(ctx, spikeBinary, workspace(t), spikeBinary, []string{"worker"},
+		err := supervise(ctx, microoperatorBinary, workspace(t), target, []string{"-sandbox-probe=pipe"},
 			func(_ io.Writer, out io.Reader) error {
 				reader := bufio.NewReaderSize(out, maxFrame+1)
 				ready, err := readMessage(reader)
@@ -417,12 +431,8 @@ func TestWorkerDeadlineAndCancellation(t *testing.T) {
 	t.Run("cancel process group", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		target, err := os.Executable()
-		if err != nil {
-			t.Fatal(err)
-		}
 		var pids []int
-		err = supervise(ctx, spikeBinary, workspace(t), target, []string{"-spike-probe=tree"},
+		err := supervise(ctx, microoperatorBinary, workspace(t), target, []string{"-sandbox-probe=tree"},
 			func(in io.Writer, out io.Reader) error {
 				reply, err := exchange(in, out)
 				if err != nil {
@@ -462,6 +472,8 @@ func TestWorkerDeadlineAndCancellation(t *testing.T) {
 	})
 }
 
+// probe is a subprocess fixture compiled only into the integration test binary.
+// The production executable provides confinement, not a placeholder agent loop.
 func probe() error {
 	if *probeMode == "sleep" {
 		time.Sleep(time.Hour)
@@ -470,15 +482,19 @@ func probe() error {
 	if err := writeMessage(os.Stdout, message{Type: "ready"}); err != nil {
 		return err
 	}
-	if _, err := readMessage(bufio.NewReaderSize(os.Stdin, maxFrame+1)); err != nil {
+	request, err := readMessage(bufio.NewReaderSize(os.Stdin, maxFrame+1))
+	if err != nil {
 		return err
+	}
+	if request.Type != "probe" {
+		return fmt.Errorf("unexpected fixture request %q", request.Type)
 	}
 	if *probeMode == "tree" {
 		executable, err := os.Executable()
 		if err != nil {
 			return err
 		}
-		child := exec.Command(executable, "-spike-probe=sleep")
+		child := exec.Command(executable, "-sandbox-probe=sleep")
 		child.Env, child.Stderr = os.Environ(), os.Stderr
 		if err := child.Start(); err != nil {
 			return err
@@ -505,6 +521,8 @@ func probe() error {
 
 func probeOperation(mode, value string) (string, error) {
 	switch mode {
+	case "pipe":
+		return "complete", nil
 	case "read":
 		data, err := os.ReadFile(value)
 		return string(data), err
@@ -581,8 +599,8 @@ func probeOperation(mode, value string) (string, error) {
 		if mode == "descendant-socket" {
 			operation = "socket"
 		}
-		cmd := exec.Command(executable, "-spike-probe="+operation, "-spike-value="+value)
-		cmd.Stdin = strings.NewReader("{\"type\":\"ping\"}\n")
+		cmd := exec.Command(executable, "-sandbox-probe="+operation, "-sandbox-value="+value)
+		cmd.Stdin = strings.NewReader("{\"type\":\"probe\"}\n")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		output, err := cmd.Output()

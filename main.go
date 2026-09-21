@@ -40,8 +40,9 @@ func main() {
 }
 
 func run(ctx context.Context, args []string) error {
+	const usage = "usage: microoperator daemon --config PATH"
 	if len(args) == 0 {
-		args = []string{"run"}
+		return errors.New(usage)
 	}
 	switch args[0] {
 	case "daemon":
@@ -54,94 +55,14 @@ func run(ctx context.Context, args []string) error {
 			return errors.New("daemon requires --config PATH and no positional arguments")
 		}
 		return runDaemon(ctx, *config, os.Stdout, os.Stderr)
-	case "run":
-		flags := flag.NewFlagSet("microoperator run", flag.ContinueOnError)
-		timeout := flags.Duration("timeout", 5*time.Second, "worker lifetime limit")
-		data := flags.String("message", "ping", "text to echo through the confined worker")
-		if err := flags.Parse(args[1:]); err != nil {
-			return err
-		}
-		if flags.NArg() != 0 || *timeout <= 0 {
-			return errors.New("run requires a positive timeout and no positional arguments")
-		}
-		ctx, cancel := context.WithTimeout(ctx, *timeout)
-		defer cancel()
-		return demo(ctx, *data)
 	case "sandbox-exec":
 		if len(args) < 3 {
 			return errors.New("internal usage: sandbox-exec WORKSPACE EXECUTABLE [ARGS...]")
 		}
 		return sandboxExec(args[1], args[2], args[3:])
-	case "worker":
-		if len(args) != 1 {
-			return errors.New("worker accepts no arguments")
-		}
-		return worker(os.Stdin, os.Stdout)
 	default:
-		return errors.New("usage: microoperator daemon --config PATH | run [-timeout 5s] [-message ping]")
+		return errors.New(usage)
 	}
-}
-
-func demo(ctx context.Context, data string) (err error) {
-	fmt.Fprintln(os.Stderr, "Diagnostic spike only: confinement is not fully qualified; do not use for untrusted code. See README.md.")
-	root, err := os.MkdirTemp("", "microoperator-")
-	if err != nil {
-		return err
-	}
-	defer func(path string) { err = errors.Join(err, os.RemoveAll(path)) }(root)
-	for _, name := range []string{"inputs", "scratch", "output"} {
-		if err := os.Mkdir(filepath.Join(root, name), 0700); err != nil {
-			return err
-		}
-	}
-	root, err = filepath.EvalSymlinks(root)
-	if err != nil {
-		return err
-	}
-	executable, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	var reply message
-	if err := supervise(ctx, executable, root, executable, []string{"worker"},
-		func(in io.Writer, out io.Reader) error {
-			reader := bufio.NewReaderSize(out, maxFrame+1)
-			ready, err := readMessage(reader)
-			if err != nil {
-				return fmt.Errorf("worker readiness: %w", err)
-			}
-			if ready.Type != "ready" {
-				return fmt.Errorf("unexpected readiness message %q", ready.Type)
-			}
-			if err := writeMessage(in, message{Type: "ping", Data: data}); err != nil {
-				return err
-			}
-			reply, err = readMessage(reader)
-			if err != nil {
-				return err
-			}
-			if reply.Type != "pong" || reply.Data != data {
-				return errors.New("worker returned an unexpected reply")
-			}
-			return nil
-		}); err != nil {
-		return err
-	}
-	return writeMessage(os.Stdout, reply)
-}
-
-func worker(in io.Reader, out io.Writer) error {
-	if err := writeMessage(out, message{Type: "ready"}); err != nil {
-		return err
-	}
-	request, err := readMessage(bufio.NewReaderSize(in, maxFrame+1))
-	if err != nil {
-		return err
-	}
-	if request.Type != "ping" {
-		return fmt.Errorf("unsupported worker operation %q", request.Type)
-	}
-	return writeMessage(out, message{Type: "pong", Data: request.Data})
 }
 
 func readMessage(reader *bufio.Reader) (message, error) {
@@ -184,13 +105,13 @@ func writeMessage(writer io.Writer, value message) error {
 }
 
 // supportedSandboxPlatform limits launch to platforms with an implemented
-// diagnostic profile. It is separate from nono.IsSupported: a kernel can support
+// sandbox profile. It is separate from nono.IsSupported: a kernel can support
 // nono while still lacking controls our worker profile needs.
 //
 // Linux is currently amd64-only because the supplemental seccomp filter checks
 // that syscall ABI and uses its syscall numbers. Enabling another architecture
 // requires adapting and verifying that filter, not just changing this boolean.
-// A true result permits the diagnostic spike, not arbitrary untrusted agent code.
+// A true result reports implemented support, not permission to run untrusted code.
 func supportedSandboxPlatform() bool {
 	// ponytail: qualify additional Linux architectures with real denial tests before enabling them.
 	return runtime.GOOS == "darwin" || (runtime.GOOS == "linux" && runtime.GOARCH == "amd64")
@@ -211,7 +132,7 @@ func supportedSandboxPlatform() bool {
 // another could lose confinement. No failure path is allowed to continue to exec.
 func sandboxExec(root, target string, args []string) error {
 	if !supportedSandboxPlatform() || !nono.IsSupported() {
-		return errors.New("this sandbox spike requires supported macOS or Linux/amd64 confinement")
+		return errors.New("sandbox launch requires supported macOS or Linux/amd64 confinement")
 	}
 	root, err := filepath.EvalSymlinks(root)
 	if err != nil {

@@ -12,24 +12,22 @@ import (
 	"testing"
 )
 
-func TestWorkerProtocol(t *testing.T) {
-	for _, data := range []string{"ping", "quotes \" and newline\n", strings.Repeat("x", maxFrame-26)} {
+func TestMessageFraming(t *testing.T) {
+	maxPayload := maxFrame - len("{\"type\":\"ready\",\"data\":\"\"}\n")
+	for _, data := range []string{"control.sock", "quotes \" and newline\n", strings.Repeat("x", maxPayload)} {
 		t.Run("round-trip", func(t *testing.T) {
-			var in, out bytes.Buffer
-			if err := writeMessage(&in, message{Type: "ping", Data: data}); err != nil {
+			var out bytes.Buffer
+			value := message{Type: "ready", Data: data}
+			if err := writeMessage(&out, value); err != nil {
 				t.Fatal(err)
 			}
-			if err := worker(&in, &out); err != nil {
-				t.Fatal(err)
+			if len(data) == maxPayload && out.Len() != maxFrame {
+				t.Fatalf("boundary frame length = %d; want %d", out.Len(), maxFrame)
 			}
 			reader := bufio.NewReaderSize(&out, maxFrame+1)
-			ready, err := readMessage(reader)
-			if err != nil || ready.Type != "ready" {
-				t.Fatalf("readiness = %+v, %v", ready, err)
-			}
-			reply, err := readMessage(reader)
-			if err != nil || reply != (message{Type: "pong", Data: data}) {
-				t.Fatalf("reply = %+v, %v", reply, err)
+			got, err := readMessage(reader)
+			if err != nil || got != value {
+				t.Fatalf("decoded message = %+v, %v", got, err)
 			}
 			if _, err := readMessage(reader); !errors.Is(err, io.EOF) {
 				t.Fatalf("expected EOF, got %v", err)
@@ -37,27 +35,19 @@ func TestWorkerProtocol(t *testing.T) {
 		})
 	}
 	for name, frame := range map[string]string{
-		"unknown operation": `{"type":"exec"}` + "\n",
-		"unknown field":     `{"type":"ping","command":"ignored"}` + "\n",
-		"trailing object":   `{"type":"ping"} {}` + "\n",
-		"empty type":        `{"data":"ping"}` + "\n",
-		"null":              "null\n",
-		"wrong type":        `{"type":42}` + "\n",
-		"malformed":         "{\n",
-		"unterminated":      `{"type":"ping"}`,
-		"oversized":         `{"type":"ping","data":"` + strings.Repeat("x", maxFrame) + "\"}\n",
+		"unknown field":   `{"type":"ready","command":"ignored"}` + "\n",
+		"trailing object": `{"type":"ready"} {}` + "\n",
+		"empty type":      `{"data":"control.sock"}` + "\n",
+		"null":            "null\n",
+		"wrong type":      `{"type":42}` + "\n",
+		"malformed":       "{\n",
+		"unterminated":    `{"type":"ready"}`,
+		"oversized":       `{"type":"ready","data":"` + strings.Repeat("x", maxFrame) + "\"}\n",
 	} {
 		t.Run(name, func(t *testing.T) {
-			var out bytes.Buffer
-			if err := worker(strings.NewReader(frame), &out); err == nil {
-				t.Fatal("invalid request accepted")
-			}
-			reader := bufio.NewReaderSize(&out, maxFrame+1)
-			if _, err := readMessage(reader); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := readMessage(reader); !errors.Is(err, io.EOF) {
-				t.Fatalf("invalid request produced a reply: %v", err)
+			reader := bufio.NewReaderSize(strings.NewReader(frame), maxFrame+1)
+			if _, err := readMessage(reader); err == nil {
+				t.Fatal("invalid message accepted")
 			}
 		})
 	}
@@ -68,11 +58,12 @@ type shortWriter struct{}
 func (shortWriter) Write(p []byte) (int, error) { return len(p) - 1, nil }
 
 func TestBoundsAndLaunchValidation(t *testing.T) {
-	if err := writeMessage(shortWriter{}, message{Type: "ping"}); !errors.Is(err, io.ErrShortWrite) {
+	if err := writeMessage(shortWriter{}, message{Type: "ready"}); !errors.Is(err, io.ErrShortWrite) {
 		t.Fatalf("short write = %v", err)
 	}
 	var out bytes.Buffer
-	if err := writeMessage(&out, message{Type: "ping", Data: strings.Repeat("x", maxFrame)}); err == nil || out.Len() != 0 {
+	oversizedPayload := maxFrame - len("{\"type\":\"ready\",\"data\":\"\"}\n") + 1
+	if err := writeMessage(&out, message{Type: "ready", Data: strings.Repeat("x", oversizedPayload)}); err == nil || out.Len() != 0 {
 		t.Fatal("oversized frame was written")
 	}
 	var stderr boundedStderr
@@ -86,7 +77,7 @@ func TestBoundsAndLaunchValidation(t *testing.T) {
 		t.Fatal("supervision without a deadline accepted")
 	}
 	for _, args := range [][]string{
-		{"run", "-timeout", "0s"}, {"run", "unexpected"}, {"sandbox-exec"}, {"worker", "unexpected"}, {"unknown"},
+		nil, {"run"}, {"run", "-message", "legacy"}, {"worker"}, {"sandbox-exec"}, {"unknown"},
 		{"daemon"}, {"daemon", "--config", ""}, {"daemon", "--config", "unused.json", "unexpected"},
 	} {
 		if err := run(context.Background(), args); err == nil {

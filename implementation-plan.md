@@ -4,14 +4,14 @@
 This document tracks implementation order and milestone acceptance.
 [README.md](README.md) is authoritative for current commands and known limitations.
 
-Implement small vertical slices, retaining the existing diagnostic command.
+Implement small vertical slices; retire completed milestone demos from the runtime.
 Do not scaffold every future package, table, or interface at once.
 
 ## Sequence and status
 
 | Milestone | Status | Depends on | Result |
 | --- | --- | --- | --- |
-| 0. Worker-launch spike | Implemented, diagnostic only | None | Confined ping/pong, supervision, and real subprocess checks |
+| 0. Worker-launch foundation | Implemented, not fully qualified | None | Sandbox launcher, framing, supervision, and real subprocess checks retained |
 | 1. Configuration and daemon state | Implemented, inactive systems only | 0 | Validated configuration and persistent system lifecycle |
 | 2. Model broker and one operator | Next | 1 | One prompt produces a tracked, rate-limited response |
 | 3. Scoped tool registry | Planned | 1-2 | Granted shared tools/skills and system-local proposal records |
@@ -27,29 +27,30 @@ autonomous deployment. Do not start the deferred native upgrade as part of ordin
 feature work. Diagnostic fixtures must not become a production bypass for failed
 profile checks or an unsandboxed fallback.
 
-## 0. Existing worker-launch spike
+## 0. Worker-launch foundation
 
-Already present:
+The phase-0 demo command and placeholder worker have been removed. Retained
+infrastructure and coverage:
 
 - [go.mod](go.mod) and `go.sum`: Go module with a pinned nono-go dependency.
-- [main.go](main.go): diagnostic parent, sandbox launcher, and fixed worker;
-  private workspace, sanitized environment, bounded JSON IPC, readiness handshake,
-  deadline/cancellation handling, and process-group cleanup.
+- [main.go](main.go): command dispatch, internal sandbox launcher, sanitized
+  environment, bounded JSON framing, deadline/cancellation handling, and
+  process-group supervision.
 - [sandbox_linux.go](sandbox_linux.go) and [sandbox_darwin.go](sandbox_darwin.go):
   platform runtime grants and Linux/amd64's supplemental socket-denying seccomp filter.
 - [main_test.go](main_test.go): framing, argument validation, and output bounds.
-- [sandbox_integration_test.go](sandbox_integration_test.go): actual subprocess
-  filesystem/connection checks, thread/descendant inheritance, descriptor and
+- [sandbox_integration_test.go](sandbox_integration_test.go): integration-only
+  target fixtures and actual subprocess filesystem/connection checks,
+  thread/descendant inheritance, descriptor and
   environment isolation, failed setup, deadlines, and cancellation.
 - [README.md](README.md): reproducible run/check commands and explicit limits.
 
-The hello exchange, unit/component checks, vet, and diagnostic integration checks
-including race detection previously ran successfully on macOS/arm64. On 21 September
-2026 they also passed on Linux/amd64 WSL2 with the supplemental socket filter;
-macOS was not rerun on that host. Linux checks cover the observed Unix-socket gap,
-descriptor isolation, and filter inheritance through real launcher/worker processes.
-These results cover the spike's measured behavior, not the entire target sandbox
-contract. See the [README](README.md#linuxwsl2-recheck) for verified scope.
+The launch foundation was previously exercised on macOS/arm64 and Linux/amd64
+WSL2 with the supplemental Linux socket filter. Pipe communication, confinement,
+descriptor isolation, inheritance, and cancellation are now exercised using
+integration-only targets, without shipping a simulated agent. These results cover
+the measured boundaries, not the entire target sandbox contract; macOS was not
+rerun on the Linux host. See the [README](README.md#linuxwsl2-recheck) for verified scope.
 The complete qualification gate remains open; keep its technical blocker details
 in [README.md](README.md#before-enabling-agent-execution).
 
@@ -239,7 +240,7 @@ eligible prior revision without rewriting history or granting other systems acce
 - Run targeted checks during development, then the applicable complete suites at
   milestone exit. Update documentation and status only after the observable result
   and relevant failure paths work.
-- Preserve the macOS and Linux/amd64 diagnostic profiles. Add another platform
+- Preserve the macOS and Linux/amd64 sandbox profiles. Add another platform
   only with its own verified profile and integration evidence.
 - The configuration-ownership and host-access alternatives in spec section 2.4
   remain unconfirmed. Use the documented conservative defaults; ask before expanding
