@@ -28,6 +28,7 @@ const maxFrame = 64 * 1024
 type message struct {
 	Type string `json:"type"`
 	Data string `json:"data,omitempty"`
+	ID   string `json:"id,omitempty"`
 }
 
 func main() {
@@ -60,6 +61,20 @@ func run(ctx context.Context, args []string) error {
 			return errors.New("internal usage: sandbox-exec WORKSPACE EXECUTABLE [ARGS...]")
 		}
 		return sandboxExec(args[1], args[2], args[3:])
+	case "sandbox-exec-profile":
+		if len(args) < 4 || len(args[3]) > maxFrame {
+			return errors.New("internal usage: sandbox-exec-profile WORKSPACE EXECUTABLE PROFILE [ARGS...]")
+		}
+		var profile sandboxConfig
+		if err := decodeJSON([]byte(args[3]), &profile); err != nil {
+			return err
+		}
+		return sandboxExec(args[1], args[2], args[4:], profile)
+	case "worker":
+		if len(args) != 2 || args[1] != "operator" {
+			return errors.New(usage)
+		}
+		return operatorWorker(os.Stdin, os.Stdout)
 	default:
 		return errors.New(usage)
 	}
@@ -74,19 +89,16 @@ func readMessage(reader *bufio.Reader) (message, error) {
 	if len(frame) > maxFrame {
 		return value, errors.New("JSON frame exceeds size limit")
 	}
-	decoder := json.NewDecoder(bytes.NewReader(frame))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&value); err != nil {
+	if err := decodeJSON(frame, &value); err != nil {
 		return value, fmt.Errorf("decode JSON frame: %w", err)
 	}
 	if value.Type == "" {
 		return value, errors.New("JSON frame requires a type")
 	}
-	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
-		return value, errors.New("JSON frame must contain exactly one object")
-	}
 	return value, nil
 }
+
+func checkFrame(value message) error { return writeMessage(io.Discard, value) }
 
 func writeMessage(writer io.Writer, value message) error {
 	frame, err := json.Marshal(value)
@@ -130,7 +142,17 @@ func supportedSandboxPlatform() bool {
 // Ordering matters: native restrictions attach to OS execution state, not to a Go
 // goroutine's identity. Applying them on one thread and executing the worker on
 // another could lose confinement. No failure path is allowed to continue to exec.
-func sandboxExec(root, target string, args []string) error {
+func sandboxExec(root, target string, args []string, profiles ...sandboxConfig) error {
+	profile := sandboxConfig{Read: []string{"inputs"}, ReadWrite: []string{"scratch", "output"}, Network: "blocked"}
+	if len(profiles) > 1 {
+		return errors.New("only one sandbox profile is allowed")
+	}
+	if len(profiles) == 1 {
+		profile = profiles[0]
+	}
+	if err := validateSandbox("sandbox_profile", profile); err != nil {
+		return err
+	}
 	if !supportedSandboxPlatform() || !nono.IsSupported() {
 		return errors.New("sandbox launch requires supported macOS or Linux/amd64 confinement")
 	}
@@ -150,28 +172,31 @@ func sandboxExec(root, target string, args []string) error {
 	if err := caps.AllowFile(target, nono.AccessRead); err != nil {
 		return fmt.Errorf("grant executable: %w", err)
 	}
-	for _, name := range []string{"inputs", "scratch", "output"} {
-		path := filepath.Join(root, name)
-		resolved, err := filepath.EvalSymlinks(path)
-		if err != nil {
-			return fmt.Errorf("resolve %s: %w", name, err)
-		}
-		if resolved != path {
-			return fmt.Errorf("workspace directory %s must not be a symlink", name)
-		}
-		info, err := os.Stat(path)
-		if err != nil {
-			return err
-		}
-		if !info.IsDir() {
-			return fmt.Errorf("workspace entry %s is not a directory", name)
-		}
-		access := nono.AccessReadWrite
-		if name == "inputs" {
-			access = nono.AccessRead
-		}
-		if err := caps.AllowPath(path, access); err != nil {
-			return fmt.Errorf("grant %s: %w", name, err)
+	for _, grant := range []struct {
+		paths  []string
+		access nono.AccessMode
+	}{
+		{profile.Read, nono.AccessRead}, {profile.ReadWrite, nono.AccessReadWrite},
+	} {
+		for _, name := range grant.paths {
+			path := filepath.Join(root, name)
+			resolved, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				return fmt.Errorf("resolve %s: %w", name, err)
+			}
+			if resolved != path {
+				return fmt.Errorf("workspace directory %s must not be a symlink", name)
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				return err
+			}
+			if !info.IsDir() {
+				return fmt.Errorf("workspace entry %s is not a directory", name)
+			}
+			if err := caps.AllowPath(path, grant.access); err != nil {
+				return fmt.Errorf("grant %s: %w", name, err)
+			}
 		}
 	}
 	if err := configurePlatformSandbox(caps); err != nil {
@@ -283,9 +308,27 @@ func killGroup(pid int) error {
 
 func supervise(ctx context.Context, launcher, root, target string, args []string,
 	communicate func(io.Writer, io.Reader) error,
+	profiles ...sandboxConfig,
 ) (err error) {
 	if _, ok := ctx.Deadline(); !ok {
 		return errors.New("worker supervision requires a deadline")
+	}
+	commandArgs := append([]string{"sandbox-exec", root, target}, args...)
+	if len(profiles) > 1 {
+		return errors.New("only one sandbox profile is allowed")
+	}
+	if len(profiles) == 1 {
+		if err := validateSandbox("sandbox_profile", profiles[0]); err != nil {
+			return err
+		}
+		data, err := json.Marshal(profiles[0])
+		if err != nil {
+			return err
+		}
+		if len(data) > maxFrame {
+			return errors.New("sandbox profile exceeds launch limit")
+		}
+		commandArgs = append([]string{"sandbox-exec-profile", root, target, string(data)}, args...)
 	}
 	inRead, inWrite, err := os.Pipe()
 	if err != nil {
@@ -300,7 +343,7 @@ func supervise(ctx context.Context, launcher, root, target string, args []string
 	defer outRead.Close()
 	defer outWrite.Close()
 	var stderr boundedStderr
-	cmd := exec.CommandContext(ctx, launcher, append([]string{"sandbox-exec", root, target}, args...)...)
+	cmd := exec.CommandContext(ctx, launcher, commandArgs...)
 	cmd.Dir, cmd.Env = root, workerEnv(root)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = inRead, outWrite, &stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

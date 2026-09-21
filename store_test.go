@@ -319,7 +319,7 @@ func TestPinnedDefinitionsAndFutureSchema(t *testing.T) {
 	if err != nil || !strings.Contains(inspected.BlockedReason, "operator.model") {
 		t.Fatalf("removed model was not reported: %+v, %v", inspected, err)
 	}
-	if _, err := store.db.Exec("PRAGMA user_version = 2"); err != nil {
+	if _, err := store.db.Exec("PRAGMA user_version = 3"); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.db.Close(); err != nil {

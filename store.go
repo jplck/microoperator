@@ -19,9 +19,10 @@ import (
 )
 
 var (
-	errSystemNotFound   = errors.New("system not found")
-	errCommandConflict  = errors.New("idempotency key was already used for a different command")
-	errRevisionConflict = errors.New("system revision has changed")
+	errSystemNotFound    = errors.New("system not found")
+	errCommandConflict   = errors.New("idempotency key was already used for a different command")
+	errRevisionConflict  = errors.New("system revision has changed")
+	errExecutionConflict = errors.New("execution state conflicts with this command; stop active work before revising or starting again")
 )
 
 type toolPin struct {
@@ -47,19 +48,21 @@ type initialGoal struct {
 }
 
 type systemRecord struct {
-	ID              string       `json:"system_id"`
-	OperatorID      string       `json:"operator_id"`
-	Launch          string       `json:"launch"`
-	State           string       `json:"state"`
-	Revision        int64        `json:"revision"`
-	ConfigurationID string       `json:"configuration_id"`
-	Configuration   systemConfig `json:"configuration"`
-	Grants          systemGrants `json:"grants"`
-	UsedTokens      int64        `json:"used_tokens"`
-	RemainingTokens int64        `json:"remaining_tokens"`
-	Goal            *initialGoal `json:"initial_goal,omitempty"`
-	CreatedAt       string       `json:"created_at"`
-	BlockedReason   string       `json:"blocked_reason,omitempty"`
+	ID              string           `json:"system_id"`
+	OperatorID      string           `json:"operator_id"`
+	Launch          string           `json:"launch"`
+	State           string           `json:"state"`
+	Revision        int64            `json:"revision"`
+	ConfigurationID string           `json:"configuration_id"`
+	Configuration   systemConfig     `json:"configuration"`
+	Grants          systemGrants     `json:"grants"`
+	UsedTokens      int64            `json:"used_tokens"`
+	ReservedTokens  int64            `json:"reserved_tokens"`
+	RemainingTokens int64            `json:"remaining_tokens"`
+	Goal            *initialGoal     `json:"initial_goal,omitempty"`
+	CreatedAt       string           `json:"created_at"`
+	BlockedReason   string           `json:"blocked_reason,omitempty"`
+	Execution       *executionRecord `json:"execution,omitempty"`
 }
 
 type createSystemCommand struct {
@@ -193,7 +196,24 @@ func openStore(ctx context.Context, filename string) (*stateStore, error) {
 }
 
 func (store *stateStore) migrate(ctx context.Context) (err error) {
-	tx, err := store.db.BeginTx(ctx, nil)
+	conn, err := store.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, conn.Close()) }()
+	// SQLite table rebuilds require disabling foreign keys outside the transaction.
+	// Check the rebuilt graph before commit, then restore enforcement on this exact
+	// connection. No daemon handlers exist while startup migrations run.
+	if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys = OFF"); err != nil {
+		return err
+	}
+	defer func() {
+		restoreCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, restoreErr := conn.ExecContext(restoreCtx, "PRAGMA foreign_keys = ON")
+		err = errors.Join(err, restoreErr)
+	}()
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin migration: %w", err)
 	}
@@ -222,9 +242,25 @@ func (store *stateStore) migrate(ctx context.Context) (err error) {
 		if _, err := tx.ExecContext(ctx, schemaV1); err != nil {
 			return fmt.Errorf("apply schema migration 1: %w", err)
 		}
+		fallthrough
 	case 1:
+		if _, err := tx.ExecContext(ctx, schemaV2); err != nil {
+			return fmt.Errorf("apply schema migration 2: %w", err)
+		}
+	case 2:
 	default:
 		return fmt.Errorf("unsupported database schema version %d", version)
+	}
+	rows, err := tx.QueryContext(ctx, "PRAGMA foreign_key_check")
+	if err != nil {
+		return err
+	}
+	broken := rows.Next()
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return err
+	}
+	if broken {
+		return errors.New("database migration found inconsistent foreign keys")
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
@@ -300,7 +336,7 @@ func (cfg configuration) grantsFor(definition systemConfig) (systemGrants, error
 // cannot silently substitute a new model, profile, tool version, or quota policy.
 // A later explicit revision binds the user's selection to the new definitions.
 func (cfg configuration) inspect(record systemRecord) (systemRecord, error) {
-	record.RemainingTokens = record.Configuration.Limits.TokenBudget - record.UsedTokens
+	record.RemainingTokens = record.Configuration.Limits.TokenBudget - record.UsedTokens - record.ReservedTokens
 	if err := cfg.validateSystem(record.Configuration); err != nil {
 		record.BlockedReason = err.Error()
 		return record, nil
@@ -439,14 +475,17 @@ func (store *stateStore) reviseSystem(ctx context.Context, principal, key, syste
 		if command.ExpectedRevision != record.Revision {
 			return record, errRevisionConflict
 		}
+		if record.State == "running" || record.State == "stopping" {
+			return record, errExecutionConflict
+		}
 		if command.Configuration == nil {
 			return record, invalid("configuration", "is required")
 		}
 		if err := cfg.validateSystem(*command.Configuration); err != nil {
 			return record, err
 		}
-		if command.Configuration.Limits.TokenBudget < record.UsedTokens {
-			return record, invalid("limits.token_budget", "cannot be lower than consumed usage")
+		if command.Configuration.Limits.TokenBudget < record.UsedTokens+record.ReservedTokens {
+			return record, invalid("limits.token_budget", "cannot be lower than consumed or reserved usage")
 		}
 		record.Configuration, record.ConfigurationID = *command.Configuration, configID
 		record.Revision++
@@ -492,11 +531,11 @@ func readSystem(ctx context.Context, tx *sql.Tx, principal, systemID string) (sy
 	var record systemRecord
 	var definition, grants []byte
 	err := tx.QueryRowContext(ctx, `SELECT s.system_id, s.operator_id, s.launch, s.state,
-		s.revision, s.used_tokens, s.created_at, r.config_id, r.definition, r.grants
+		s.revision, s.used_tokens, s.reserved_tokens, s.created_at, r.config_id, r.definition, r.grants
 		FROM systems s JOIN system_revisions r ON r.system_id = s.system_id AND r.revision = s.revision
 		WHERE s.system_id = ? AND s.owner = ?`, systemID, principal).Scan(
 		&record.ID, &record.OperatorID, &record.Launch, &record.State, &record.Revision,
-		&record.UsedTokens, &record.CreatedAt, &record.ConfigurationID, &definition, &grants)
+		&record.UsedTokens, &record.ReservedTokens, &record.CreatedAt, &record.ConfigurationID, &definition, &grants)
 	if errors.Is(err, sql.ErrNoRows) {
 		return record, errSystemNotFound
 	}
@@ -511,12 +550,18 @@ func readSystem(ctx context.Context, tx *sql.Tx, principal, systemID string) (sy
 	}
 	var goal initialGoal
 	err = tx.QueryRowContext(ctx, `SELECT goal_id, system_id, prompt, state, token_budget
-		FROM goals WHERE system_id = ? AND owner = ?`, systemID, principal).Scan(
+		FROM goals WHERE system_id = ? AND owner = ? AND is_initial = 1`, systemID, principal).Scan(
 		&goal.ID, &goal.SystemID, &goal.Prompt, &goal.State, &goal.TokenBudget)
 	if err == nil {
 		record.Goal = &goal
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return record, fmt.Errorf("read initial goal: %w", err)
+	}
+	execution, err := readExecution(ctx, tx, systemID, "")
+	if err == nil {
+		record.Execution = &execution
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return record, err
 	}
 	return record, nil
 }

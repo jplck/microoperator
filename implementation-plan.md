@@ -13,8 +13,8 @@ Do not scaffold every future package, table, or interface at once.
 | --- | --- | --- | --- |
 | 0. Worker-launch foundation | Implemented, not fully qualified | None | Sandbox launcher, framing, supervision, and real subprocess checks retained |
 | 1. Configuration and daemon state | Implemented, inactive systems only | 0 | Validated configuration and persistent system lifecycle |
-| 2. Model broker and one operator | Next | 1 | One prompt produces a tracked, rate-limited response |
-| 3. Scoped tool registry | Planned | 1-2 | Granted shared tools/skills and system-local proposal records |
+| 2. Model broker and one operator | Implemented, reviewed single-turn worker only | 1 | One prompt produces a tracked, rate-limited response |
+| 3. Scoped tool registry | Next | 1-2 | Granted shared tools/skills and system-local proposal records |
 | 4. Durable events and agent teams | Planned | 1-3 | Multiple systems self-organize through governed events |
 | 5. Memory and scheduled wakeups | Planned | 4 | Scoped retrieval, subscriptions, and persistent timers |
 | 6. Detached control UI | Planned | 1-5 | Create, steer, inspect, pause/resume, and stop systems |
@@ -52,7 +52,7 @@ integration-only targets, without shipping a simulated agent. These results cove
 the measured boundaries, not the entire target sandbox contract; macOS was not
 rerun on the Linux host. See the [README](README.md#linuxwsl2-recheck) for verified scope.
 The complete qualification gate remains open; keep its technical blocker details
-in [README.md](README.md#before-enabling-agent-execution).
+in [README.md](README.md#before-enabling-untrusted-execution).
 
 ## 1. Configuration, persistence, and daemon lifecycle
 
@@ -84,8 +84,9 @@ merely because a configuration is declared.
 strict JSON loading, private SQLite state with explicit migrations, immutable
 configuration/revision/grant snapshots, pending initial goals, audit records,
 durable command receipts, and an authenticated Unix-socket control API.
-The OpenAI-compatible provider shape and shared skills are validated as metadata;
-model calls, executable tools, and future built-in broker operations are not stubbed.
+Milestone 1 validated provider/skill metadata without stubbing execution. Milestone 2
+below now supplies model calls and pinned skill context; executable tools and future
+built-in delegation operations remain disabled.
 
 Unit/component checks, vet, and race-enabled real-process integration checks passed
 on Linux/amd64 WSL2. Two instances were created, one revised, and both recovered
@@ -116,6 +117,29 @@ and usage record. Concurrent systems share provider limits without sharing state
 Exercise streaming, throttling, retries, cancellation, exhausted budgets, and
 restart. Unknown call outcomes are recorded, not silently replayed or charged as
 zero. Stop terminates the selected worker without affecting another system.
+
+**Implemented scope and evidence**
+
+[execution.go](execution.go) runs one reviewed, confined operator activation per
+system, with correlated private-pipe IPC and a durable goal/task/call identity.
+[provider.go](provider.go) implements bounded Chat Completions and SSE consumption;
+credentials stay in the daemon, redirects/proxies are disabled, and model text is
+never interpreted as code or a tool call.
+[broker.go](broker.go) shares durable quota groups across aliases, rotates admission
+across systems, and atomically reserves goal/system allowances. Request buckets,
+rolling token windows, concurrency, queue limits, cooldowns, explicit 429 retries,
+usage uncertainty, and storage-failure denial are enforced.
+[execution_store.go](execution_store.go) migrates existing state, retains call
+history/receipts, and rejects unrecoverable work visibly rather than replaying
+ambiguous effects. Only authenticated starts launch work; stop remains system-scoped.
+
+Component and real daemon/worker scenarios cover fake-provider responses, streaming,
+shared admission, throttling, cancellation, command replay, and graceful/abrupt
+restart. Unknown outcomes retain reservations; neither restart nor new goals refill
+lifetime budgets. Linux/amd64 WSL2 is the checked host; macOS has not been rerun.
+See [README.md](README.md#run-one-operator-goal) for commands, fixed bounds, usage
+estimates, and remaining qualification limits. This is not a multi-turn tool loop,
+currency-accounting implementation, or approval for generated/untrusted execution.
 
 ## 3. Central registry and governed tool/skill use
 
@@ -202,7 +226,7 @@ match registry rules. Closing the UI neither stops work nor approves requests.
 
 This gate is not complete and does not schedule the deferred dependency work.
 Revisit the outstanding qualification items in
-[README.md](README.md#before-enabling-agent-execution) when explicitly authorized.
+[README.md](README.md#before-enabling-untrusted-execution) when explicitly authorized.
 Also complete the router/broker/eventing trust-boundary review recorded in the spec.
 
 Require real denial, cleanup, revocation, and delegated-authority checks on every

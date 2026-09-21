@@ -1,7 +1,8 @@
 # Microoperator: technical specification
 
-Target design contract and architecture rationale. An inactive-system control
-daemon and sandbox launch infrastructure are implemented; see [README.md](README.md)
+Target design contract and architecture rationale. A persistent control daemon,
+shared model broker, and reviewed single-turn sandboxed operator are implemented;
+see [README.md](README.md)
 for commands, verified scope, and unresolved native confinement limitations.
 It is not yet approved for untrusted agent code.
 See [implementation-plan.md](implementation-plan.md) for milestone status,
@@ -75,11 +76,11 @@ affected work with a visible reason, never an implicit substitute.
 
 ### 2.2. Example configuration
 
-The versioned loader is implemented for inactive configuration/state management.
-The target-v1 example below includes built-in broker operations that milestone 1
+The versioned loader and single-turn model execution are implemented.
+The target-v1 example below includes built-in broker operations that milestone 2
 still rejects as unimplemented; use the [runnable daemon example](README.md#daemon)
 for the current slice. Replace the intentionally invalid endpoint/model before
-future model execution; example quotas are not provider guarantees.
+model execution; example quotas are not provider guarantees.
 
 ```json
 {
@@ -154,7 +155,7 @@ future model execution; example quotas are not provider guarantees.
 ```
 
 Model aliases reference registered provider adapters and all applicable quota
-groups. The first planned provider adapter is OpenAI-compatible Chat Completions;
+groups. The initial provider adapter implements OpenAI-compatible Chat Completions;
 a gateway may supply that API. Changing `base_url` does not change the protocol.
 Additional adapters must be explicitly implemented, not inferred from a URL.
 
@@ -318,10 +319,11 @@ files, memory, or credentials. Shared publication grants no system access by its
 
 ## 3. Worker lifecycle and brokers
 
-Use one executable with `daemon` and internal `sandbox-exec` modes. The target
-runtime adds a real `worker` mode with the model broker; milestone 1 ships no
-placeholder worker or demo command. The daemon launches a fresh sandbox-exec child
-with a trusted profile and pinned executable.
+Use one executable with `daemon`, internal `sandbox-exec`/`sandbox-exec-profile`,
+and `worker operator` modes. Milestone 2's reviewed worker performs one model turn,
+not arbitrary generated code or a multi-turn tool loop. The phase-0 echo demo
+remains removed. The daemon launches a fresh sandbox-exec child with a trusted
+profile and pinned executable.
 The child applies nono-go on a locked OS thread and immediately execs the target
 on that thread, without unlocking or running agent logic in between. Never call
 irreversible `nono.Apply` in the daemon. Reuse this launch path for operators,
@@ -495,6 +497,17 @@ Expose queue wait, in-flight calls, quota-group utilization, tokens/cost, thrott
 retries, and budget exhaustion in the API/UI. Rate waiting, exhausted budget, and
 provider failure are distinct states.
 
+Milestone 2 uses persisted request token buckets and a rolling 60-second reserved
+token window. Its OpenAI-compatible input estimate is serialized request bytes plus
+configurable `input_headroom_percent` (default 20); this is deliberately conservative,
+not an exact tokenizer or cost guarantee. Currency pricing is unsupported. Only
+explicit 429 rejections retry, at most three attempts, within the original activation
+deadline. Streams are bounded and buffered through terminal usage before delivery.
+Unknown outcomes retain their reservations; no automatic refund/reconciliation
+endpoint exists yet. A single active goal/operator per system makes system-level
+round-robin also goal-fair for this slice. Additional agents and multi-turn tools
+remain disabled.
+
 An existing external gateway can be a configured provider endpoint when multiple
 applications share quotas. Keep local fairness and budgets; never bypass a failed
 gateway automatically. Preserve the configured model API semantics and document
@@ -582,10 +595,14 @@ Expose an authenticated versioned API for systems, goals, agents, tasks, grants,
 limits/usage, the scoped tool registry, messages, memory, schedules, artifacts,
 revisions, and approvals.
 Provide scoped snapshot queries and a resumable event stream with event IDs.
-Milestone 1 exposes only the authenticated local-administrator API for inactive
-creation, listing, inspection, and revision, with an optional pending initial goal.
-Its environment-supplied control token is not a worker credential. See the
-[current API](README.md#control-api); execution and browser access remain disabled.
+The current authenticated local-administrator API creates, lists, inspects, and
+revises systems, starts/stops reviewed single-turn operators, and exposes durable
+model-call history and broker utilization. Its environment-supplied control token
+is not a worker credential. See the [current API](README.md#control-api); browser
+access, arbitrary workers, generated code, and tool execution remain disabled.
+Milestone 2 requires stopping active work before revising grants. Unfinished work
+after a daemon restart becomes visibly failed/stopped, with uncertain dispatches
+retained for reconciliation rather than automatically resumed or replayed.
 
 The complete target command set includes create/start/stop system, submit goal,
 send input, approve/reject, revise, revoke, pause/resume, and cancel.

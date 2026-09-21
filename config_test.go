@@ -28,7 +28,7 @@ func fixtureConfiguration(t *testing.T) configuration {
 			"primary": {"openai-chat-completions", "https://provider.example.invalid/v1", fixtureProviderEnv},
 		},
 		Models: map[string]modelConfig{
-			"default": {"primary", "fixture-model", []string{"account"}, 1024},
+			"default": {"primary", "fixture-model", []string{"account"}, 1024, 0},
 		},
 		QuotaGroups: map[string]quotaConfig{
 			"account": {60, 60000, 1, 2, 100, 30},

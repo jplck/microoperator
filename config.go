@@ -45,10 +45,11 @@ type providerConfig struct {
 }
 
 type modelConfig struct {
-	Provider        string   `json:"provider"`
-	Model           string   `json:"model"`
-	QuotaGroups     []string `json:"quota_groups"`
-	MaxOutputTokens int64    `json:"max_output_tokens"`
+	Provider             string   `json:"provider"`
+	Model                string   `json:"model"`
+	QuotaGroups          []string `json:"quota_groups"`
+	MaxOutputTokens      int64    `json:"max_output_tokens"`
+	InputHeadroomPercent int64    `json:"input_headroom_percent,omitempty"`
 }
 
 type quotaConfig struct {
@@ -256,6 +257,9 @@ func (cfg configuration) validate(lookupEnv func(string) (string, bool)) error {
 			return invalid("models", "invalid name")
 		}
 		field := "models." + name
+		if model.InputHeadroomPercent < 0 || model.InputHeadroomPercent > 1000 {
+			return invalid(field+".input_headroom_percent", "must be between 0 and 1000; zero selects the 20 percent default")
+		}
 		if _, ok := cfg.Providers[model.Provider]; !ok {
 			return invalid(field+".provider", "unknown provider")
 		}
@@ -283,27 +287,8 @@ func (cfg configuration) validate(lookupEnv func(string) (string, bool)) error {
 			return invalid("sandbox_profiles", "invalid name")
 		}
 		field := "sandbox_profiles." + name
-		if profile.Network != "blocked" {
-			return invalid(field+".network", "only blocked networking is supported")
-		}
-		for _, list := range []struct {
-			name     string
-			paths    []string
-			writable bool
-		}{{"read", profile.Read, false}, {"read_write", profile.ReadWrite, true}} {
-			if len(list.paths) > 256 {
-				return invalid(field+"."+list.name, "too many paths")
-			}
-			seen := make(map[string]bool)
-			for _, value := range list.paths {
-				base, _, _ := strings.Cut(value, "/")
-				validBase := base == "scratch" || base == "output" || (!list.writable && base == "inputs")
-				if !validBase || value != path.Clean(value) || len(value) > 4096 ||
-					strings.ContainsAny(value, "\\\x00") || seen[value] {
-					return invalid(field+"."+list.name, "paths must be unique, clean, and inside permitted workspace directories")
-				}
-				seen[value] = true
-			}
+		if err := validateSandbox(field, profile); err != nil {
+			return err
 		}
 	}
 	for name, tool := range cfg.Tools {
@@ -360,6 +345,31 @@ func (cfg configuration) validate(lookupEnv func(string) (string, bool)) error {
 		}
 		if err := cfg.validateSystem(system); err != nil {
 			return fmt.Errorf("systems.%s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func validateSandbox(field string, profile sandboxConfig) error {
+	if profile.Network != "blocked" {
+		return invalid(field+".network", "only blocked networking is supported")
+	}
+	for _, list := range []struct {
+		name     string
+		paths    []string
+		writable bool
+	}{{"read", profile.Read, false}, {"read_write", profile.ReadWrite, true}} {
+		if len(list.paths) > 256 {
+			return invalid(field+"."+list.name, "too many paths")
+		}
+		seen := make(map[string]bool)
+		for _, value := range list.paths {
+			base, _, _ := strings.Cut(value, "/")
+			validBase := base == "scratch" || base == "output" || (!list.writable && base == "inputs")
+			if !validBase || value != path.Clean(value) || len(value) > 4096 || strings.ContainsAny(value, "\\\x00") || seen[value] {
+				return invalid(field+"."+list.name, "paths must be unique, clean, and inside permitted workspace directories")
+			}
+			seen[value] = true
 		}
 	}
 	return nil

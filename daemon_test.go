@@ -55,7 +55,7 @@ func TestControlAuthorizationValidationAndRevisions(t *testing.T) {
 	cfg := fixtureConfiguration(t)
 	store, configID := fixtureStore(t, cfg)
 	var logs bytes.Buffer
-	handler := newControlHandler(store, cfg, configID, fixtureControlToken, log.New(&logs, "", 0))
+	handler := newControlHandler(store, cfg, configID, fixtureControlToken, log.New(&logs, "", 0), nil)
 	for _, route := range []string{"/v1/health", "/v1/launch-configurations", "/v1/systems", "/v1/unknown"} {
 		response := controlRequest(handler, "GET", route, "", "", "wrong")
 		if response.Code != http.StatusUnauthorized {
@@ -123,8 +123,8 @@ func TestControlAuthorizationValidationAndRevisions(t *testing.T) {
 	if response := controlRequest(handler, "POST", "/v1/systems", "create", `{"launch":"research"}`, fixtureControlToken); response.Code != http.StatusConflict {
 		t.Fatalf("idempotency conflict status %d", response.Code)
 	}
-	if response := controlRequest(handler, "POST", "/v1/systems/"+first.ID+"/start", "start", `{}`, fixtureControlToken); response.Code != http.StatusNotFound {
-		t.Fatalf("unimplemented execution route accepted: %d", response.Code)
+	if response := controlRequest(handler, "POST", "/v1/systems/"+first.ID+"/start", "start", `{}`, fixtureControlToken); response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("execution accepted without a lifecycle owner: %d", response.Code)
 	}
 	foreign, err := store.createSystem(context.Background(), "another-principal", "foreign", createSystemCommand{Launch: "research"}, cfg, configID)
 	if err != nil {
@@ -148,7 +148,7 @@ func TestControlAuthorizationValidationAndRevisions(t *testing.T) {
 func TestControlPaginationAndStorageFailures(t *testing.T) {
 	cfg := fixtureConfiguration(t)
 	store, configID := fixtureStore(t, cfg)
-	handler := newControlHandler(store, cfg, configID, fixtureControlToken, log.New(&bytes.Buffer{}, "", 0))
+	handler := newControlHandler(store, cfg, configID, fixtureControlToken, log.New(&bytes.Buffer{}, "", 0), nil)
 	for i := 0; i < 21; i++ {
 		if _, err := store.createSystem(context.Background(), localAdministrator, fmt.Sprintf("create-%d", i),
 			createSystemCommand{Launch: "research"}, cfg, configID); err != nil {

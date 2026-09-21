@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -111,8 +112,8 @@ func listenControl(directory string) (*net.UnixListener, error) {
 }
 
 // runDaemon owns the store, socket, and HTTP server until shutdown. Loading named
-// launch configurations only records administrative metadata: there is no worker,
-// provider call, or automatic system creation anywhere in this lifecycle.
+// launch configurations only records administrative metadata. Only explicit,
+// authenticated start commands activate the reviewed operator.
 func runDaemon(ctx context.Context, configPath string, stdout, stderr io.Writer) (err error) {
 	cfg, err := loadConfiguration(configPath, os.LookupEnv)
 	if err != nil {
@@ -149,8 +150,13 @@ func runDaemon(ctx context.Context, configPath string, stdout, stderr io.Writer)
 		}
 	}()
 	logger := log.New(stderr, "daemon: ", log.LstdFlags)
+	engine, err := newExecutionEngine(ctx, store, cfg, logger)
+	if err != nil {
+		return err
+	}
+	defer engine.close()
 	server := &http.Server{
-		Handler:           newControlHandler(store, cfg, configID, token, logger),
+		Handler:           newControlHandler(store, cfg, configID, token, logger, engine),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
 		WriteTimeout: 15 * time.Second, IdleTimeout: 30 * time.Second,
 		MaxHeaderBytes: 8192, ErrorLog: logger,
@@ -189,16 +195,23 @@ type controlAPI struct {
 	cfg      configuration
 	configID string
 	logger   *log.Logger
+	engine   *executionEngine
 }
 
-func newControlHandler(store *stateStore, cfg configuration, configID, token string, logger *log.Logger) http.Handler {
-	api := &controlAPI{store, cfg, configID, logger}
+func newControlHandler(store *stateStore, cfg configuration, configID, token string, logger *log.Logger, engine *executionEngine) http.Handler {
+	api := &controlAPI{store: store, cfg: cfg, configID: configID, logger: logger, engine: engine}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, r *http.Request) {
+		available := engine != nil && engine.broker.available()
+		status := "ready"
+		if engine != nil && !available {
+			status = "degraded"
+		}
 		api.respond(w, http.StatusOK, struct {
-			Status           string `json:"status"`
-			ExecutionEnabled bool   `json:"execution_enabled"`
-		}{"ready", false})
+			Status                    string `json:"status"`
+			ExecutionEnabled          bool   `json:"execution_enabled"`
+			UntrustedExecutionEnabled bool   `json:"untrusted_execution_enabled"`
+		}{status, available, false})
 	})
 	mux.HandleFunc("GET /v1/launch-configurations", func(w http.ResponseWriter, r *http.Request) {
 		type launch struct {
@@ -222,6 +235,10 @@ func newControlHandler(store *stateStore, cfg configuration, configID, token str
 	mux.HandleFunc("POST /v1/systems", api.create)
 	mux.HandleFunc("GET /v1/systems/{system_id}", api.get)
 	mux.HandleFunc("PUT /v1/systems/{system_id}/configuration", api.revise)
+	mux.HandleFunc("POST /v1/systems/{system_id}/start", api.start)
+	mux.HandleFunc("POST /v1/systems/{system_id}/stop", api.stop)
+	mux.HandleFunc("GET /v1/model-broker", api.brokerStatus)
+	mux.HandleFunc("GET /v1/systems/{system_id}/model-calls", api.calls)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		api.failure(w, errSystemNotFound)
 	})
@@ -235,7 +252,8 @@ func newControlHandler(store *stateStore, cfg configuration, configID, token str
 			api.respond(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
 			return
 		}
-		// Milestone 1 has a single local administrator, not worker sessions.
+		// Control requests authenticate the local administrator. Worker sessions
+		// use their daemon-owned pipes, never this token or caller-supplied IDs.
 		// Identity comes from this successful token check, never a request field.
 		// Browser clients belong to the later UI; reject their Origin requests.
 		if r.Header.Get("Origin") != "" {
@@ -270,14 +288,106 @@ func (api *controlAPI) failure(w http.ResponseWriter, err error) {
 		status, message = http.StatusBadRequest, err.Error()
 	case errors.Is(err, errSystemNotFound):
 		status, message = http.StatusNotFound, errSystemNotFound.Error()
-	case errors.Is(err, errCommandConflict), errors.Is(err, errRevisionConflict):
+	case errors.Is(err, errCommandConflict), errors.Is(err, errRevisionConflict), errors.Is(err, errExecutionConflict):
 		status, message = http.StatusConflict, err.Error()
+	case errors.Is(err, errBrokerUnavailable):
+		status, message = http.StatusServiceUnavailable, err.Error()
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		status, message = http.StatusRequestTimeout, "request canceled or deadline exceeded"
 	default:
 		api.logger.Printf("control operation failed: %v", err)
 	}
 	api.respond(w, status, map[string]string{"error": message})
+}
+
+func (api *controlAPI) executionAvailable(w http.ResponseWriter) bool {
+	if api.engine == nil {
+		api.respond(w, http.StatusServiceUnavailable, map[string]string{"error": "execution owner unavailable"})
+		return false
+	}
+	return true
+}
+
+func (api *controlAPI) start(w http.ResponseWriter, r *http.Request) {
+	if !api.executionAvailable(w) {
+		return
+	}
+	var command startSystemCommand
+	key, err := readCommand(w, r, &command)
+	id := r.PathValue("system_id")
+	if err == nil && !systemIDPattern.MatchString(id) {
+		err = errSystemNotFound
+	}
+	if err == nil && command.ExpectedRevision < 1 {
+		err = invalid("expected_revision", "must be positive")
+	}
+	if err != nil {
+		api.failure(w, err)
+		return
+	}
+	record, err := api.engine.start(r.Context(), localAdministrator, key, id, command)
+	api.systemResponse(w, http.StatusAccepted, record, err)
+}
+
+func (api *controlAPI) stop(w http.ResponseWriter, r *http.Request) {
+	if !api.executionAvailable(w) {
+		return
+	}
+	var command struct{}
+	key, err := readCommand(w, r, &command)
+	id := r.PathValue("system_id")
+	if err == nil && !systemIDPattern.MatchString(id) {
+		err = errSystemNotFound
+	}
+	if err != nil {
+		api.failure(w, err)
+		return
+	}
+	record, err := api.engine.stop(r.Context(), localAdministrator, key, id)
+	api.systemResponse(w, http.StatusAccepted, record, err)
+}
+
+func (api *controlAPI) brokerStatus(w http.ResponseWriter, r *http.Request) {
+	if !api.executionAvailable(w) {
+		return
+	}
+	quotas, err := api.engine.broker.quotas(r.Context())
+	if err != nil {
+		api.failure(w, err)
+		return
+	}
+	api.respond(w, http.StatusOK, struct {
+		Available        bool        `json:"available"`
+		Quotas           []quotaView `json:"quota_groups"`
+		PricingSupported bool        `json:"pricing_supported"`
+		InputEstimate    string      `json:"input_estimate"`
+	}{api.engine.broker.available(), quotas, false, "serialized bytes plus model headroom; not tokenizer-exact"})
+}
+
+func (api *controlAPI) calls(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("system_id")
+	if !systemIDPattern.MatchString(id) {
+		api.failure(w, errSystemNotFound)
+		return
+	}
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	var after int64
+	if query.Get("after") != "" {
+		after, err = strconv.ParseInt(query.Get("after"), 10, 64)
+	}
+	if err != nil || after < 0 || len(query) > 1 || (len(query) == 1 && len(query["after"]) != 1) {
+		api.failure(w, invalid("after", "invalid model-call cursor"))
+		return
+	}
+	calls, next, err := api.store.listCalls(r.Context(), localAdministrator, id, after)
+	if err != nil {
+		api.failure(w, err)
+		return
+	}
+	api.respond(w, http.StatusOK, struct {
+		Calls []executionRecord `json:"calls"`
+		Next  int64             `json:"next,omitempty"`
+	}{calls, next})
 }
 
 func readCommand(w http.ResponseWriter, r *http.Request, target any) (string, error) {
@@ -295,6 +405,9 @@ func readCommand(w http.ResponseWriter, r *http.Request, target any) (string, er
 	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxFrame))
 	if err != nil {
 		return "", invalid("body", "cannot read JSON body within the 64 KiB limit")
+	}
+	if body := strings.TrimSpace(string(data)); len(body) == 0 || body[0] != '{' {
+		return "", invalid("body", "requires a JSON object")
 	}
 	if err := decodeJSON(data, target); err != nil {
 		return "", invalid("body", err.Error())

@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -60,12 +61,23 @@ func integrationMain(m *testing.M) int {
 	microoperatorBinary = filepath.Join(root, "microoperator")
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "go", "build", "-o", microoperatorBinary, ".")
+	buildArgs := []string{"build", "-o", microoperatorBinary}
+	raceEnabled := false
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			if setting.Key == "-race" && setting.Value == "true" {
+				raceEnabled = true
+				buildArgs = append(buildArgs, "-race")
+			}
+		}
+	}
+	buildArgs = append(buildArgs, ".")
+	cmd := exec.CommandContext(ctx, "go", buildArgs...)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "build runtime: %v\n%s", err, output)
 		return 1
 	}
-	fmt.Printf("sandbox integration: %s/%s, nono FFI reports %s\n", runtime.GOOS, runtime.GOARCH, nono.Version())
+	fmt.Printf("sandbox integration: %s/%s, nono FFI reports %s, application race detector: %t\n", runtime.GOOS, runtime.GOARCH, nono.Version(), raceEnabled)
 	return m.Run()
 }
 
