@@ -37,6 +37,7 @@ func modelRequest(cfg configuration, record systemRecord, prompt string, stream 
 }
 
 func conversationRequest(cfg configuration, record systemRecord, conversation []chatMessage, stream bool) ([]byte, int64, error) {
+	cfg = cfg.withLocalTools(record.localTools)
 	model, ok := cfg.Models[record.Grants.Model]
 	if !ok {
 		return nil, 0, invalid("model", "grant no longer exists")

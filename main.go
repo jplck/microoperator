@@ -41,11 +41,32 @@ func main() {
 }
 
 func run(ctx context.Context, args []string) error {
-	const usage = "usage: microoperator daemon --config PATH"
+	const usage = "usage: microoperator daemon --config PATH | ui --socket PATH [--listen 127.0.0.1:8080] | toolchain-digest ABSOLUTE_GOROOT"
 	if len(args) == 0 {
 		return errors.New(usage)
 	}
 	switch args[0] {
+	case "toolchain-digest":
+		if len(args) != 2 {
+			return errors.New("usage: microoperator toolchain-digest ABSOLUTE_GOROOT")
+		}
+		digest, err := toolchainDigest(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(os.Stdout, digest)
+		return err
+	case "ui":
+		flags := flag.NewFlagSet("microoperator ui", flag.ContinueOnError)
+		socket := flags.String("socket", "", "daemon Unix socket")
+		listen := flags.String("listen", "127.0.0.1:8080", "loopback HTTP address")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if flags.NArg() != 0 || *socket == "" {
+			return errors.New("ui requires --socket PATH and no positional arguments")
+		}
+		return runUI(ctx, *socket, *listen, os.Stdout, os.Stderr)
 	case "daemon":
 		flags := flag.NewFlagSet("microoperator daemon", flag.ContinueOnError)
 		config := flags.String("config", "", "user-owned JSON configuration")
@@ -61,13 +82,20 @@ func run(ctx context.Context, args []string) error {
 			return errors.New("internal usage: sandbox-exec WORKSPACE EXECUTABLE [ARGS...]")
 		}
 		return sandboxExec(args[1], args[2], args[3:])
-	case "sandbox-exec-profile":
+	case "sandbox-exec-profile", "sandbox-build-profile":
 		if len(args) < 4 || len(args[3]) > maxFrame {
 			return errors.New("internal usage: sandbox-exec-profile WORKSPACE EXECUTABLE PROFILE [ARGS...]")
 		}
 		var profile sandboxConfig
 		if err := decodeJSON([]byte(args[3]), &profile); err != nil {
 			return err
+		}
+		if args[0] == "sandbox-build-profile" {
+			if len(args) < 5 || profile.Resources == nil {
+				return errors.New("builder requires a resource profile and pinned toolchain")
+			}
+			profile.toolchain = args[4]
+			args = append(args[:4:4], args[5:]...)
 		}
 		return sandboxExec(args[1], args[2], args[4:], profile)
 	case "worker":
@@ -172,10 +200,23 @@ func sandboxExec(root, target string, args []string, profiles ...sandboxConfig) 
 	if !filepath.IsAbs(root) || !filepath.IsAbs(target) {
 		return errors.New("workspace and executable must be absolute paths")
 	}
+	runtime.LockOSThread()
+	// Namespace setup and irreversible filters must remain on the exec thread.
+	if err := prepareResourceWorkspace(root, profile); err != nil {
+		return err
+	}
 	caps := nono.New()
 	defer caps.Close()
 	if err := caps.AllowFile(target, nono.AccessRead); err != nil {
 		return fmt.Errorf("grant executable: %w", err)
+	}
+	if profile.toolchain != "" {
+		if profile.Resources == nil || target != filepath.Join(profile.toolchain, "bin", "go") {
+			return errors.New("toolchain grant is restricted to the confined Go builder")
+		}
+		if err := caps.AllowPath(profile.toolchain, nono.AccessRead); err != nil {
+			return fmt.Errorf("grant pinned toolchain: %w", err)
+		}
 	}
 	for _, grant := range []struct {
 		paths  []string
@@ -221,7 +262,6 @@ func sandboxExec(root, target string, args []string, profiles ...sandboxConfig) 
 	if err := closeOnExecDescriptors(); err != nil {
 		return err
 	}
-	runtime.LockOSThread()
 	// Deliberately do not defer UnlockOSThread. Successful exec never returns;
 	// failure returns to main only to report the error and exit this child.
 	// No worker code may run between installing restrictions and exec.
@@ -231,7 +271,11 @@ func sandboxExec(root, target string, args []string, profiles ...sandboxConfig) 
 	if err := nono.Apply(caps); err != nil {
 		return fmt.Errorf("apply nono sandbox: %w", err)
 	}
-	if err := syscall.Exec(target, append([]string{target}, args...), workerEnv(root)); err != nil {
+	env := workerEnv(root)
+	if profile.toolchain != "" {
+		env = append(env, buildEnvironment(root, profile.toolchain)...)
+	}
+	if err := syscall.Exec(target, append([]string{target}, args...), env); err != nil {
 		return fmt.Errorf("exec confined worker: %w", err)
 	}
 	return nil
@@ -315,6 +359,12 @@ func supervise(ctx context.Context, launcher, root, target string, args []string
 	communicate func(io.Writer, io.Reader) error,
 	profiles ...sandboxConfig,
 ) (err error) {
+	return superviseWorkspace(ctx, launcher, root, target, args, communicate, nil, profiles...)
+}
+
+func superviseWorkspace(ctx context.Context, launcher, root, target string, args []string,
+	communicate func(io.Writer, io.Reader) error, inspect func(*os.Root) error, profiles ...sandboxConfig,
+) (err error) {
 	if _, ok := ctx.Deadline(); !ok {
 		return errors.New("worker supervision requires a deadline")
 	}
@@ -334,6 +384,9 @@ func supervise(ctx context.Context, launcher, root, target string, args []string
 			return errors.New("sandbox profile exceeds launch limit")
 		}
 		commandArgs = append([]string{"sandbox-exec-profile", root, target, string(data)}, args...)
+		if profiles[0].toolchain != "" {
+			commandArgs = append([]string{"sandbox-build-profile", root, target, string(data), profiles[0].toolchain}, args...)
+		}
 	}
 	inRead, inWrite, err := os.Pipe()
 	if err != nil {
@@ -352,9 +405,29 @@ func supervise(ctx context.Context, launcher, root, target string, args []string
 	cmd.Dir, cmd.Env = root, workerEnv(root)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = inRead, outWrite, &stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	profile := sandboxConfig{}
+	if len(profiles) == 1 {
+		profile = profiles[0]
+	}
+	cleanup, err := prepareResourceProcess(cmd, profile)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, cleanup()) }()
+	if profile.Resources != nil {
+		// PR_SET_PDEATHSIG is tied to the creating OS thread, not its goroutine.
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+	}
 	cmd.WaitDelay = 250 * time.Millisecond
+	terminate := func() error {
+		if profile.Resources != nil {
+			return cleanup()
+		}
+		return killGroup(cmd.Process.Pid)
+	}
 	cmd.Cancel = func() error {
-		if err := killGroup(cmd.Process.Pid); err != nil {
+		if err := terminate(); err != nil {
 			return err
 		}
 		return nil
@@ -362,7 +435,7 @@ func supervise(ctx context.Context, launcher, root, target string, args []string
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start sandbox launcher: %w", err)
 	}
-	defer func() { err = errors.Join(err, killGroup(cmd.Process.Pid)) }()
+	defer func() { err = errors.Join(err, terminate()) }()
 	stopIO := context.AfterFunc(ctx, func() {
 		inWrite.Close()
 		outRead.Close()
@@ -372,13 +445,40 @@ func supervise(ctx context.Context, launcher, root, target string, args []string
 	outWrite.Close()
 	waited := make(chan error, 1)
 	go func() { waited <- cmd.Wait() }()
-	communicationErr := communicate(inWrite, outRead)
+	reader := bufio.NewReaderSize(outRead, maxFrame+1)
+	var workspace *os.Root
+	var communicationErr error
+	if profile.Resources != nil {
+		var setup message
+		setup, communicationErr = readMessage(reader)
+		if communicationErr == nil && setup != (message{Type: "sandbox.workspace"}) {
+			communicationErr = errors.New("missing resource workspace bootstrap")
+		}
+		if communicationErr == nil {
+			workspace, communicationErr = openResourceWorkspace(cmd.Process.Pid, root)
+		}
+		if communicationErr == nil {
+			communicationErr = writeMessage(inWrite, message{Type: "sandbox.workspace.accepted"})
+		}
+	} else if inspect != nil {
+		workspace, communicationErr = os.OpenRoot(root)
+	}
+	if workspace != nil {
+		defer func() { err = errors.Join(err, workspace.Close()) }()
+	}
+	if communicationErr == nil {
+		communicationErr = communicate(inWrite, reader)
+	}
 	inWrite.Close()
 	if communicationErr != nil {
-		err = killGroup(cmd.Process.Pid)
+		err = terminate()
 	}
 	waitErr := <-waited
 	err = errors.Join(err, communicationErr, waitErr, ctx.Err())
+	err = errors.Join(err, terminate())
+	if err == nil && inspect != nil {
+		err = inspect(workspace)
+	}
 	if err != nil && stderr.Len() != 0 {
 		err = fmt.Errorf("%w; worker stderr: %s", err, stderr.String())
 	}

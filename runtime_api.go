@@ -30,6 +30,7 @@ func (api *controlAPI) registerRuntimeRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/systems/{system_id}/artifacts", api.artifacts)
 	mux.HandleFunc("GET /v1/systems/{system_id}/tool-calls", api.toolCalls)
 	mux.HandleFunc("POST /v1/systems/{system_id}/input", api.input)
+	mux.HandleFunc("POST /v1/systems/{system_id}/attachments", api.attachment)
 	mux.HandleFunc("POST /v1/systems/{system_id}/{action}", api.control)
 	mux.HandleFunc("POST /v1/systems/{system_id}/agents/{agent_id}/{action}", api.control)
 	mux.HandleFunc("POST /v1/systems/{system_id}/goals/{goal_id}/{action}", api.control)
@@ -43,11 +44,18 @@ func (api *controlAPI) tools(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if toolID := r.PathValue("tool_id"); toolID != "" {
+		var selected *registryEntry
 		for _, entry := range entries {
 			if entry.ID == toolID {
-				api.respond(w, 200, entry)
-				return
+				if selected == nil || entry.Version > selected.Version {
+					copy := entry
+					selected = &copy
+				}
 			}
+		}
+		if selected != nil {
+			api.respond(w, 200, selected)
+			return
 		}
 		api.failure(w, errSystemNotFound)
 		return
@@ -113,7 +121,7 @@ func (api *controlAPI) draftState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if command.Version < 1 || (command.State != "rejected" && command.State != "disabled") {
-		api.failure(w, invalid("state", "drafts may only be rejected or disabled; evaluation/promotion is not enabled"))
+		api.failure(w, invalid("state", "revisions may only be rejected or disabled here; approval requires exact protected evaluation evidence"))
 		return
 	}
 	id := r.PathValue("tool_id")
@@ -132,6 +140,11 @@ func (api *controlAPI) draftState(w http.ResponseWriter, r *http.Request) {
 		if n != 1 {
 			return nil, errSystemNotFound
 		}
+		if _, err := tx.ExecContext(r.Context(), `UPDATE learning_evaluations SET state=?
+		 WHERE system_id=? AND tool_id=? AND version=? AND state NOT IN ('queued','evaluating')`,
+			command.State, s.ID, id, command.Version); err != nil {
+			return nil, err
+		}
 		return map[string]string{"tool_id": id, "state": command.State}, nil
 	})
 	api.systemResponse(w, 200, record, err)
@@ -147,22 +160,32 @@ func (api *controlAPI) revoke(w http.ResponseWriter, r *http.Request) {
 		api.failure(w, err)
 		return
 	}
-	tool, ok := api.cfg.tool(command.Name)
-	if !ok || command.Version != tool.Version {
-		api.failure(w, invalid("tool", "unknown or stale shared version"))
-		return
-	}
 	if api.engine != nil {
 		api.engine.mu.Lock()
 		defer api.engine.mu.Unlock()
 	}
 	record, err := api.mutation(r.Context(), key, r.PathValue("system_id"), "tool.revoke", command, func(tx *sql.Tx, s systemRecord) (any, error) {
+		if strings.HasPrefix(command.Name, "local.") {
+			var count int
+			if err := tx.QueryRowContext(r.Context(), `SELECT count(*) FROM learning_approvals WHERE system_id=? AND tool_id=? AND version=?`, s.ID, command.Name, command.Version).Scan(&count); err != nil {
+				return nil, err
+			}
+			if count != 1 {
+				return nil, invalid("tool", "no approved local version in this system")
+			}
+		} else if tool, ok := api.cfg.tool(command.Name); !ok || command.Version != tool.Version {
+			return nil, invalid("tool", "unknown or stale shared version")
+		}
 		_, err := tx.ExecContext(r.Context(), `INSERT OR IGNORE INTO tool_revocations(system_id,name,version) VALUES(?,?,?)`, s.ID, command.Name, command.Version)
 		return command, err
 	})
 	if err == nil && api.engine != nil {
 		for _, active := range api.engine.active {
 			if active.systemID != record.ID {
+				continue
+			}
+			if strings.HasPrefix(active.callID, "evaluation_") {
+				active.cancel()
 				continue
 			}
 			task, taskErr := api.engine.taskSnapshot(r.Context(), record.ID, active.taskID)
@@ -583,31 +606,9 @@ func (api *controlAPI) input(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	record, err := api.mutation(r.Context(), key, r.PathValue("system_id"), "user.input", command, func(tx *sql.Tx, s systemRecord) (any, error) {
-		if s.State != "running" && s.State != "paused" {
-			return nil, errExecutionConflict
-		}
-		agentID := command.AgentID
-		if agentID == "" {
-			agentID = s.OperatorID
-		}
-		var taskID string
-		err := tx.QueryRowContext(r.Context(), `SELECT task_id FROM tasks WHERE system_id=? AND agent_id=? AND state IN ('queued','running','waiting')`, s.ID, agentID).Scan(&taskID)
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, errSystemNotFound
-		}
+		t, err := activeInputTask(r.Context(), tx, s, command.AgentID)
 		if err != nil {
 			return nil, err
-		}
-		t, err := readTask(r.Context(), tx, s.ID, taskID)
-		if err != nil {
-			return nil, err
-		}
-		var control string
-		if err := tx.QueryRowContext(r.Context(), `SELECT control FROM goals WHERE system_id=? AND goal_id=?`, s.ID, t.GoalID).Scan(&control); err != nil {
-			return nil, err
-		}
-		if control == "stopped" || t.Control == "stopped" {
-			return nil, errExecutionConflict
 		}
 		id, err := emitEvent(r.Context(), tx, t, "user.input", localAdministrator, "", struct {
 			Content string `json:"content"`

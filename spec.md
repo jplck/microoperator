@@ -1,10 +1,12 @@
 # Microoperator: technical specification
 
 Target design contract and architecture rationale. A persistent control daemon,
-shared model broker, scoped tool registry, and durable sandboxed agent teams are implemented;
+shared model broker, scoped registry, durable teams, memory/wakeups, detached UI,
+and governed system-local learning are implemented;
 see [README.md](README.md)
 for commands, verified scope, and unresolved native confinement limitations.
-It is not yet approved for untrusted agent code.
+Generated Go is enabled only through exact approval/assignment on the qualified
+resource-confined Linux/amd64 profile. Reviewed-only profiles and macOS cannot run it.
 See [implementation-plan.md](implementation-plan.md) for milestone status,
 dependencies, and acceptance checks. Diagnostic success is not qualification.
 "Must" denotes an implementation requirement, not a claim of completed functionality.
@@ -297,7 +299,8 @@ ingestion. Its reports are at most 4096 bytes and stored in scoped SQLite rows;
 large/general artifacts retain the separate-storage target in section 6.
 Catalog access does not grant execution. Rebuilding the reviewed binary requires
 explicit reassignment through stopped-system revision, not silent pin replacement.
-Local source cannot yet be evaluated, approved, assigned, built, or executed.
+Milestone 7 adds protected evaluation and human-controlled local promotion.
+Registration alone still grants no execution.
 
 System-local proposals follow:
 
@@ -315,6 +318,10 @@ the tool to an agent: grant it to the system and then an agent/task explicitly,
 within existing authority. Agents cannot approve their own expansion.
 Definition changes create new versions; lifecycle transitions are audited without
 mutating versioned content.
+The current implementation supports 64 draft revisions/system, at most 32 per ID.
+Revisions use the existing local ID and an expected prior version; agents cannot
+choose a new shared/built-in identity. Catalogs expose all versions, evidence,
+approval expiry, and remaining task uses.
 
 Revocation/disable blocks subsequent calls even for pinned tasks. Selecting another
 approved version or rolling back creates an explicit assignment/revision change;
@@ -324,8 +331,10 @@ Evaluation and promotion consume the originating system/goal's normal budgets.
 Publishing a local tool as shared is a separate user-controlled action, never an
 agent side effect. Under the JSON-owned v1 default, export a reviewed manifest and
 shareable artifact, then explicitly import it into administrative configuration.
-Copy approved content into shared artifact scope; do not expose private system
-files, memory, or credentials. Shared publication grants no system access by itself.
+Do not expose private system files, memory, or credentials. Current shared imports
+support reviewed skill content only; generated executables remain system-local
+and must be independently evaluated/approved in another system. Shared publication
+grants no system access by itself.
 
 ## 3. Worker lifecycle and brokers
 
@@ -413,6 +422,18 @@ cannot be enforced, and report them in daemon health and the UI. A binding/core
 upgrade is a prerequisite where needed, never grounds for bypassing a check.
 Qualify a supported host profile before enabling autonomous generated code.
 
+The opt-in Linux/amd64 `resources` profile implements per-activation cgroup v2
+CPU quota, memory/swap and process/thread limits, plus one size/inode-bounded
+private tmpfs. It requires a delegated systemd user service. Atomic cgroup entry,
+private user/mount/PID/IPC/network namespaces, a sealed parent-death signal, and
+`cgroup.kill` cover descendants that leave the original process group and abrupt
+supervisor death. The daemon's creating thread remains locked until reap.
+Bootstrap acknowledgement prevents workload execution if its supervisor died
+before parent-death protection was installed. Private workspace descriptors remain
+valid for authorized artifact ingestion after the namespace exits.
+No resource request may silently use the reviewed nil-resource profile instead.
+macOS rejects resource profiles and remains unqualified for generated execution.
+
 ## 4. Messaging and wakeups
 
 Agents address peers directly through the daemon's authorized router, not through
@@ -487,7 +508,15 @@ recipient, 32 source events per agent/minute, 8192-byte payloads, and causation 
 the waiting continuation instead of rolling back a known outcome or disabling
 the shared broker. Queued worker setup gets at most three delivery attempts with
 2/4-second backoff. Progress is durable inspection data, not a separate activation.
-Publish/subscribe, timers, memory notifications, and standing work remain milestone 5.
+Milestone 5 implements bounded one-shot/cron schedules and subscriptions to
+authorized memory changes or same-goal task completion. There are 128 schedule IDs
+and 128 subscription IDs/system, each with 1-8 triggers within the owning goal.
+`robfig/cron/v3` supplies the five-field parser: nonexistent spring times are
+skipped and repeated fall times fire twice at distinct UTC instants. Missed runs
+coalesce into one event; occurrence, cursor, allowance, and mailbox commit together.
+Self-memory notifications are suppressed. Timer/event waits release workers.
+An authenticated start may set `lifetime_seconds` to 1-86400; no worker, schedule,
+pause, or restart can extend that deadline or reset budgets.
 
 ## 5. LLM admission and permissions
 
@@ -576,8 +605,20 @@ Shared knowledge uses scoped, approval-controlled promotion.
 Entries carry provenance, author, goal/task references, timestamps, confidence,
 evidence, version, classification, and expiry/retention.
 Retrieve relevant entries within context limits; treat retrieved content as
-untrusted data. Cross-system sharing requires explicit collection access or
-authorized export. Retention/deletion must cover artifacts, indexes, and backups.
+untrusted data. Cross-system sharing requires explicit authorized export.
+The implemented memory bounds are 512 IDs/system, 32 revisions/ID, 4096-byte
+content, 1024-byte evidence, eight artifact references, confidence 0-100, and
+1 second to 365 days' retention. Search authorizes scope/owner/state/expiry before
+matching and byte-aware pagination, returning at most ten entries within 8 KiB.
+Worker-owned system notes require human approval and cannot overwrite an existing
+reviewed shared fact.
+
+Retention/deletion purges memory revisions and their artifact references and
+keeps a tombstone against resurrection. Original task artifacts, conversations,
+model requests, and command receipts retain independent history. V1 has no managed
+backups or secure-erasure facility; do not claim deletion of historical copies.
+Physical erasure across those stores and administrator backups requires a separate
+retention/export policy before offering such a guarantee.
 
 Learning is `outcome -> proposal -> evaluation -> promotion -> reuse`, not model
 weight updates. Task events or bounded schedules may wake an improvement agent.
@@ -618,6 +659,48 @@ with a visible reason and cannot trigger permission expansion.
 Generated tools have no broker access by default. Any needed access uses a separate,
 scoped session and the same permission checks; children cannot acquire broader rights.
 
+### Implemented learning bounds
+
+Prompt improvements are immutable skill fragments, not automatic rewrites of an
+agent's base prompt. Human-owned protected suites contain one or two exact-output
+cases (1024-byte input, 4096-byte expected output); suites are immutable and capped
+at 64/system. Feedback records success/failure with task provenance, capped at
+512/system. Existing task/call history retains unsuccessful outcomes too.
+
+Evaluation requires live originating work, existing grants, capacity, and remaining
+goal/system budget. At most four evaluations belong to one goal. Skill comparisons
+use ordinary reviewed workers and the shared model broker, including ancestor
+budgets and the normal agent/task/activation limits. Evaluation workers have no
+executable tools, and their protected inputs cannot be amended. An explicitly
+granted `runtime.learning.evaluate` operation waits durably and resumes its caller
+with evidence, never approval. Human-requested evaluations remain inspection-only.
+
+Generated code implements `Process(string) (string, error)` in `package main`.
+A fixed wrapper supplies bounded JSON input/output; required tool capabilities
+must be empty. Compilation uses a complete pinned local Go tree, `CGO_ENABLED=0`,
+an isolated cache, `GOTOOLCHAIN=local`, and disabled downloads. Only the builder
+gets read-only toolchain access; toolchain and daemon state cannot overlap.
+Builds use at most 120 seconds, invocations ten seconds, and binaries 32 MiB.
+The daemon compares protected outputs from fresh sandboxes, not candidate-supplied
+pass/fail claims. An initial executable baseline is text identity; a later comparison
+may select an exact, already granted generated version.
+
+Evidence binds source/definition, baseline, protected checks, configuration revision,
+capability profile, runtime/toolchain identity, build settings, and binary digest.
+An authenticated human must approve that exact evidence with an expiry of
+1-86400 seconds and 1-64 distinct-task uses. The first model dispatch consumes a
+task use transactionally, including for skills; retries and continuations reuse it.
+No automatic refund or allowance renewal follows a failed task or a new command key.
+New-key approval replay, stale configuration/evidence, and failed/disabled candidates
+are denied; same-key retry only returns the original durable receipt.
+
+Approval returns a scoped pin, not an assignment. System/operator revisions select
+local versions explicitly through `local_tools`; child revisions remain subsets of
+system pins. Rollback selects an eligible prior pin and preserves historical tasks.
+Binary/runtime changes, expiry, disable, and revocation prevent subsequent calls.
+Generated artifacts are private digest-addressed files outside SQLite. Interrupted
+builds are failed/quarantined, not blindly replayed; queued work may resume safely.
+
 ## 7. Control API, UI, and recovery
 
 Expose an authenticated versioned API for systems, goals, agents, tasks, grants,
@@ -628,12 +711,13 @@ The current authenticated local-administrator API creates, lists, inspects, and
 revises systems, starts bounded agent teams, and exposes registry/draft/assignment,
 task/event/artifact/tool-call inspection, durable input, and system/goal/agent
 pause/resume/stop. Model-call history and broker utilization remain available.
-Its environment-supplied control token
-is not a worker credential. See the [current API](README.md#control-api); browser
-access, arbitrary workers, and generated code remain disabled.
+Its environment-supplied control token is not a worker credential.
+Memory, wakeups, attachments, protected learning, and approval endpoints are also
+implemented. See the [current API](README.md#control-api). Browser access uses a
+separate authenticated loopback UI; arbitrary worker paths remain unsupported.
 System/operator grant revisions require stopped work. Child assignment creates
 a new revision for future tasks without rewriting running/waiting pins; revocation
-blocks pinned work too. SQLite schema 3 migrates existing state and resumes
+blocks pinned work too. SQLite schema 5 migrates existing state and resumes
 eligible durable queued work, including safe 429 retries, while paused work stays
 paused. Completed decisions and local receipts are reused without repeating effects.
 Uncertain model/subprocess dispatches fail visibly and remain recorded for
@@ -647,7 +731,8 @@ so a double click or reconnect cannot create duplicate systems, runs, or inputs.
 
 The UI is an optional, separate Go client/server with server-rendered forms and
 periodic refresh; no JavaScript application or frontend build toolchain is required.
-The event stream remains available to later clients. When connected, the UI must
+Cursor-paginated event snapshots support later clients; a live SSE stream is not
+implemented. When connected, the UI must
 support active control, not just visualization:
 
 | UI action | Required behavior |
@@ -671,6 +756,14 @@ available tools. Grant/revoke, approve/reject, assign-version, disable-local-ver
 and rollback controls invoke authorized, audited API operations. Disabling an entry
 and stopping an already-running tool are distinct actions.
 
+The UI binds only a numeric loopback address and requires a distinct browser token
+as the HTTP Basic `operator` password. Host/Origin validation, origin-bound CSRF,
+escaped templates, bounded API responses, no-store headers, and a restrictive CSP
+protect the browser boundary. The server-side Unix client alone holds the daemon
+token. Inspection views may refresh every five seconds; command forms do not.
+Inert text attachments are at most 3072 UTF-8 bytes and never authorize a host path,
+executable, or protected-evaluation input change.
+
 The UI is not an editor of administrative provider/profile/shared-tool definitions
 in v1; selection, grants, and local-tool lifecycle follow section 2. Shared publication
 uses the explicit export/import path in section 2.6. Start/steer commands cannot use
@@ -691,10 +784,11 @@ reactivating old timers, or resetting consumed system budgets.
 
 The implemented scheduler uses one active goal/system, one activation/agent,
 per-system active-agent limits, and a global 64-activation ceiling. All descendants
-and continuations share the original goal deadline (shortest quota wait plus
-three 60-second provider allowances). Pause does not extend that deadline:
+and continuations share the original goal deadline (by default the shortest quota
+wait plus three 60-second provider allowances, or an explicitly authorized
+`lifetime_seconds` up to 86400). Pause does not extend that deadline:
 expired input/work gets a visible dead-letter/terminal outcome, and a goal that
-finishes during pause becomes inactive. Longer-lived standing work is deferred.
+finishes during pause becomes inactive. Indefinite standing work is not enabled.
 
 The UI owns no runtime state. Default to restricted local sockets for CLI/local
 clients and authenticated loopback access for the browser UI; loopback alone is

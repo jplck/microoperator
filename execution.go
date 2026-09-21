@@ -172,6 +172,10 @@ func (engine *executionEngine) stop(ctx context.Context, principal, key, id stri
 
 func (engine *executionEngine) execute(ctx context.Context, record systemRecord, e executionRecord) {
 	defer engine.wg.Done()
+	if e.LearningID != "" {
+		engine.executeLearning(ctx, record, e)
+		return
+	}
 	err := engine.runActivation(ctx, record, e)
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
@@ -260,7 +264,7 @@ func (engine *executionEngine) runActivation(ctx context.Context, record systemR
 				if toolErr != nil {
 					responseType, value = "tool.error", taskFailureReason(toolErr)
 				}
-				if toolErr == nil && action.Function.Name == wireToolName("runtime.task.delegate") {
+				if toolErr == nil && (action.Function.Name == wireToolName("runtime.task.delegate") || action.Function.Name == wireToolName("runtime.task.wait")) {
 					responseType = "tool.wait"
 				}
 				if err := writeMessage(in, message{Type: responseType, ID: e.CallID, Data: value}); err != nil {

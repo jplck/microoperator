@@ -34,10 +34,10 @@ func fixtureConfiguration(t *testing.T) configuration {
 			"account": {60, 60000, 1, 2, 100, 30},
 		},
 		SandboxProfiles: map[string]sandboxConfig{
-			"worker": {[]string{"inputs"}, []string{"scratch", "output"}, "blocked"},
+			"worker": {Read: []string{"inputs"}, ReadWrite: []string{"scratch", "output"}, Network: "blocked"},
 		},
 		Tools: map[string]toolConfig{
-			"shared.notes": {"skill", 1, "Fixture guidance", "Use sources, not guesses.", []string{}},
+			"shared.notes": {Kind: "skill", Version: 1, Description: "Fixture guidance", Content: "Use sources, not guesses.", RequiresTools: []string{}},
 		},
 		Systems: map[string]systemConfig{
 			"research": {
@@ -197,7 +197,7 @@ func TestConfigurationValidation(t *testing.T) {
 			c.Systems["research"] = s
 		}, "operator.tools"},
 		{"ungranted dependency", func(c *configuration) {
-			c.Tools["shared.other"] = toolConfig{"skill", 1, "Dependency", "Fixture", nil}
+			c.Tools["shared.other"] = toolConfig{Kind: "skill", Version: 1, Description: "Dependency", Content: "Fixture"}
 			tool := c.Tools["shared.notes"]
 			tool.RequiresTools = []string{"shared.other"}
 			c.Tools["shared.notes"] = tool

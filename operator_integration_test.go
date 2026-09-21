@@ -122,7 +122,7 @@ func TestOperatorModelsStopAndIsolation(t *testing.T) {
 		t.Fatalf("second activation accepted: %d", status)
 	}
 	status, _ = daemonRequest(t, d, fixtureControlToken, "PUT", "/v1/systems/"+a.ID+"/configuration", "revise-active",
-		reviseSystemCommand{1, &a.Configuration})
+		reviseSystemCommand{ExpectedRevision: 1, Configuration: &a.Configuration})
 	if status != http.StatusConflict {
 		t.Fatalf("active grant revision accepted: %d", status)
 	}

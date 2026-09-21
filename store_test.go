@@ -97,7 +97,7 @@ func TestStoreIsolationRevisionsAndRecovery(t *testing.T) {
 	next := first.Configuration
 	next.Operator.Prompt = "A revised, explicit prompt."
 	next.Limits.TokenBudget = 60000
-	update := reviseSystemCommand{first.Revision, &next}
+	update := reviseSystemCommand{ExpectedRevision: first.Revision, Configuration: &next}
 	revised, err := store.reviseSystem(ctx, localAdministrator, "revise", first.ID, update, cfg, configID)
 	if err != nil {
 		t.Fatal(err)
@@ -114,7 +114,7 @@ func TestStoreIsolationRevisionsAndRecovery(t *testing.T) {
 	}
 	belowUsage := next
 	belowUsage.Limits.TokenBudget = 9
-	if _, err := store.reviseSystem(ctx, localAdministrator, "too-low", first.ID, reviseSystemCommand{2, &belowUsage}, cfg, configID); err == nil {
+	if _, err := store.reviseSystem(ctx, localAdministrator, "too-low", first.ID, reviseSystemCommand{ExpectedRevision: 2, Configuration: &belowUsage}, cfg, configID); err == nil {
 		t.Fatal("budget below consumed usage accepted")
 	}
 	for _, table := range []string{"system_revisions", "config_snapshots", "audit"} {
@@ -214,7 +214,7 @@ func TestStoreAtomicityCancellationAndConcurrency(t *testing.T) {
 			defer wg.Done()
 			next := record.Configuration
 			next.Operator.Prompt = key
-			_, err := store.reviseSystem(ctx, localAdministrator, key, record.ID, reviseSystemCommand{1, &next}, cfg, configID)
+			_, err := store.reviseSystem(ctx, localAdministrator, key, record.ID, reviseSystemCommand{ExpectedRevision: 1, Configuration: &next}, cfg, configID)
 			results <- err
 		}(key)
 	}
@@ -306,7 +306,7 @@ func TestPinnedDefinitionsAndFutureSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	revised, err := store.reviseSystem(ctx, localAdministrator, "new-definitions", record.ID,
-		reviseSystemCommand{1, &record.Configuration}, cfg, newConfigID)
+		reviseSystemCommand{ExpectedRevision: 1, Configuration: &record.Configuration}, cfg, newConfigID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +319,7 @@ func TestPinnedDefinitionsAndFutureSchema(t *testing.T) {
 	if err != nil || !strings.Contains(inspected.BlockedReason, "operator.model") {
 		t.Fatalf("removed model was not reported: %+v, %v", inspected, err)
 	}
-	if _, err := store.db.Exec("PRAGMA user_version = 4"); err != nil {
+	if _, err := store.db.Exec("PRAGMA user_version = 6"); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.db.Close(); err != nil {

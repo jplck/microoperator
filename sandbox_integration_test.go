@@ -651,6 +651,6 @@ func probeOperation(mode, value string) (string, error) {
 		}
 		return "inherited socket descriptor", nil
 	default:
-		return "", fmt.Errorf("unknown test probe %q", mode)
+		return platformResourceProbe(mode, value)
 	}
 }

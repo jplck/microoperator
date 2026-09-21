@@ -310,6 +310,15 @@ func (b *modelBroker) admit(ctx context.Context, session executionRecord, now ti
 		if e.CallID != session.CallID {
 			break
 		}
+		if err := admitLearningUses(ctx, tx, e, now); err != nil {
+			if !deniedTask(err) {
+				return result, false, err
+			}
+			if err := terminalCall(ctx, tx, e, "rejected", err.Error()); err != nil {
+				return result, false, err
+			}
+			continue
+		}
 		for _, group := range model.QuotaGroups {
 			if _, err := tx.ExecContext(ctx, `UPDATE quota_state SET credit=credit-1 WHERE group_name=?`, group); err != nil {
 				return result, false, err

@@ -102,10 +102,12 @@ type startSystemCommand struct {
 	ExpectedRevision int64   `json:"expected_revision"`
 	Goal             *string `json:"goal,omitempty"`
 	TokenBudget      int64   `json:"token_budget,omitempty"`
+	LifetimeSeconds  int64   `json:"lifetime_seconds,omitempty"`
 	Stream           bool    `json:"stream,omitempty"`
 }
 
 type executionRecord struct {
+	LearningID      string          `json:"-"`
 	CallID          string          `json:"call_id"`
 	SystemID        string          `json:"system_id"`
 	GoalID          string          `json:"goal_id"`
@@ -211,6 +213,9 @@ func (store *stateStore) startSystem(ctx context.Context, principal, key, system
 			return record, invalid("goal", "requires a new 1-32768 byte goal, or a pending initial goal")
 		}
 		budget := command.TokenBudget
+		if command.LifetimeSeconds < 0 || command.LifetimeSeconds > 86400 {
+			return record, invalid("lifetime_seconds", "must be 0 (default) or 1-86400; only administrator starts may extend goal lifetime")
+		}
 		if budget == 0 {
 			budget = record.RemainingTokens
 			if goalID != "" {
@@ -282,6 +287,9 @@ func (store *stateStore) startSystem(ctx context.Context, principal, key, system
 			return record, invalid("goal", "encoded worker input exceeds frame limit")
 		}
 		deadline := now.Add(time.Duration(wait)*time.Second + 3*providerTimeout).UnixMilli()
+		if command.LifetimeSeconds > 0 {
+			deadline = now.Add(time.Duration(command.LifetimeSeconds) * time.Second).UnixMilli()
+		}
 		if _, err = tx.ExecContext(ctx, `INSERT INTO model_calls(call_id,system_id,goal_id,task_id,activation_id,
 		 activation_owner,revision,model,stream,state,reservation,created_at,queued_at,deadline,wait_deadline)
 		 VALUES(?,?,?,?,?,?,?,?,?,'awaiting_worker',?,?,?,?,?)`,

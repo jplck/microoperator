@@ -29,6 +29,10 @@ import (
 
 const controlTokenEnv = "MICROOPERATOR_CONTROL_TOKEN"
 
+func validAPIToken(token string) bool {
+	return len(token) >= 32 && len(token) <= 256 && strings.IndexFunc(token, func(r rune) bool { return r < 33 || r > 126 }) < 0
+}
+
 var (
 	systemIDPattern   = regexp.MustCompile(`^sys_[a-f0-9]{32}$`)
 	commandKeyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
@@ -120,7 +124,7 @@ func runDaemon(ctx context.Context, configPath string, stdout, stderr io.Writer)
 		return err
 	}
 	token := os.Getenv(controlTokenEnv)
-	if len(token) < 32 || len(token) > 256 || strings.IndexFunc(token, func(r rune) bool { return r < 33 || r > 126 }) >= 0 {
+	if !validAPIToken(token) {
 		return fmt.Errorf("%s must contain 32-256 printable non-space characters", controlTokenEnv)
 	}
 	if !supportedSandboxPlatform() || !nono.IsSupported() {
@@ -131,6 +135,15 @@ func runDaemon(ctx context.Context, configPath string, stdout, stderr io.Writer)
 		return err
 	}
 	defer func() { err = errors.Join(err, lock.Close()) }()
+	if err := cfg.prepareResources(); err != nil {
+		return err
+	}
+	if err := cfg.prepareLearning(ctx); err != nil {
+		return err
+	}
+	if err := cleanupWorkspaces(cfg.DataDir); err != nil {
+		return err
+	}
 	store, err := openStore(ctx, filepath.Join(cfg.DataDir, "state.db"))
 	if err != nil {
 		return err
@@ -207,11 +220,20 @@ func newControlHandler(store *stateStore, cfg configuration, configID, token str
 		if engine != nil && !available {
 			status = "degraded"
 		}
+		profiles := []string{}
+		for name, profile := range cfg.SandboxProfiles {
+			if generatedProfile(profile) == nil {
+				profiles = append(profiles, name)
+			}
+		}
+		sort.Strings(profiles)
 		api.respond(w, http.StatusOK, struct {
-			Status                    string `json:"status"`
-			ExecutionEnabled          bool   `json:"execution_enabled"`
-			UntrustedExecutionEnabled bool   `json:"untrusted_execution_enabled"`
-		}{status, available, false})
+			Status                    string   `json:"status"`
+			ExecutionEnabled          bool     `json:"execution_enabled"`
+			UntrustedExecutionEnabled bool     `json:"untrusted_execution_enabled"`
+			GeneratedBuildEnabled     bool     `json:"generated_build_enabled"`
+			GeneratedProfiles         []string `json:"generated_profiles"`
+		}{status, available, available && len(profiles) > 0, available && len(profiles) > 0 && cfg.Learning != nil, profiles})
 	})
 	mux.HandleFunc("GET /v1/launch-configurations", func(w http.ResponseWriter, r *http.Request) {
 		type launch struct {
@@ -240,6 +262,8 @@ func newControlHandler(store *stateStore, cfg configuration, configID, token str
 	mux.HandleFunc("GET /v1/model-broker", api.brokerStatus)
 	mux.HandleFunc("GET /v1/systems/{system_id}/model-calls", api.calls)
 	api.registerRuntimeRoutes(mux)
+	api.registerKnowledgeRoutes(mux)
+	api.registerLearningRoutes(mux)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		api.failure(w, errSystemNotFound)
 	})

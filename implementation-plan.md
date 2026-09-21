@@ -11,15 +11,15 @@ Do not scaffold every future package, table, or interface at once.
 
 | Milestone | Status | Depends on | Result |
 | --- | --- | --- | --- |
-| 0. Worker-launch foundation | Implemented, not fully qualified | None | Sandbox launcher, framing, supervision, and real subprocess checks retained |
+| 0. Worker-launch foundation | Implemented; qualification scoped by S | None | Sandbox launcher, framing, supervision, and real subprocess checks retained |
 | 1. Configuration and daemon state | Implemented, inactive systems only | 0 | Validated configuration and persistent system lifecycle |
 | 2. Model broker and one operator | Implemented; extended by 3-4 | 1 | Tracked, rate-limited model turns |
-| 3. Scoped tool registry | Implemented, reviewed tools and inert drafts | 1-2 | Granted shared tools/skills and system-local proposal records |
+| 3. Scoped tool registry | Implemented; local promotion added by 7 | 1-2 | Granted shared tools/skills and system-local proposal records |
 | 4. Durable events and agent teams | Implemented, bounded goal execution | 1-3 | Multiple systems self-organize through governed events |
-| 5. Memory and scheduled wakeups | Next | 4 | Scoped retrieval, subscriptions, and persistent timers |
-| 6. Detached control UI | Planned | 1-5 | Create, steer, inspect, pause/resume, and stop systems |
-| 7. Learning and generated tools | Planned, executable path gated | 3-6; S before untrusted build/run | Evaluated revisions and controlled tool promotion |
-| S. Sandbox and delegation qualification | Deferred; not satisfied by milestone 0 | 0, 3-4, and README prerequisites | Permission to enable untrusted execution, not another service |
+| 5. Memory and scheduled wakeups | Implemented, bounded by goal lifetime | 4 | Scoped retrieval, subscriptions, and persistent timers |
+| 6. Detached control UI | Implemented, loopback authenticated client | 1-5 | Create, steer, inspect, pause/resume, and stop systems |
+| 7. Learning and generated tools | Implemented, system-local; generated path requires S | 3-6; S before untrusted build/run | Protected evidence, exact approval, explicit assignment and rollback |
+| S. Sandbox and delegation qualification | Linux resource profile qualified on the checked host; macOS remains blocked | 0, 3-4, and README prerequisites | Required isolation profile for generated work, not another service |
 
 Milestones 1-6 can be developed and checked using reviewed workers, fixture tools,
 and fake providers. This does not authorize untrusted generated code or privileged
@@ -52,7 +52,7 @@ integration-only targets, without shipping a simulated agent. These results cove
 the measured boundaries, not the entire target sandbox contract; macOS was not
 rerun on the Linux host. See the [README](README.md#linuxwsl2-recheck) for verified scope.
 The complete qualification gate remains open; keep its technical blocker details
-in [README.md](README.md#before-enabling-untrusted-execution).
+in [README.md](README.md#required-profile-for-generated-execution).
 
 ## 1. Configuration, persistence, and daemon lifecycle
 
@@ -138,8 +138,9 @@ shared admission, throttling, cancellation, command replay, and graceful/abrupt
 restart. Unknown outcomes retain reservations; neither restart nor new goals refill
 lifetime budgets. Linux/amd64 WSL2 is the checked host; macOS has not been rerun.
 See [README.md](README.md#run-one-operator-goal) for commands, fixed bounds, usage
-estimates, and remaining qualification limits. Milestones 3-4 extend the original
-single-turn slice; currency accounting and generated/untrusted execution remain disabled.
+estimates, and remaining qualification limits. Later milestones extend this
+original single-turn slice. Currency accounting remains unsupported; milestone 7
+adds generated execution only on the qualified profile.
 
 ## 3. Central registry and governed tool/skill use
 
@@ -227,7 +228,8 @@ macOS was not rerun. The [README bounds](README.md#follow-up-input-and-scoped-co
 are deliberate: eight turns, fixed fan-out/mailbox limits, non-streaming executable
 actions, and a goal lifetime that pause does not extend. Safe queued work/receipts
 resume; ambiguous effects and legacy non-resumable calls fail visibly.
-This does not qualify generated code, hard resource limits, or orphan cleanup.
+These team checks alone do not qualify generated code or resource enforcement;
+the resource-confined Linux profile is covered separately by gate S.
 
 ## 5. Memory, subscriptions, and timers
 
@@ -247,6 +249,18 @@ Agents recover relevant permitted memories after restart; unauthorized searches
 leak neither content nor counts. Timers survive restart, coalesce missed runs,
 and do not double-fire. Revocation, expiry, queue limits, and system stop prevent
 further unauthorized wakeups. Validate retention behavior on temporary data.
+
+**Implemented**
+
+Schema 4 adds revisioned scoped notes, approval-controlled system facts, durable
+occurrences, schedules and subscriptions. Authorization precedes search/pagination;
+retrieval is explicitly untrusted data. The pinned five-field cron parser has
+documented/tested DST behavior and missed-run coalescing. Only an authenticated
+start may authorize a goal lifetime up to 24 hours; all existing budgets remain.
+Real daemon/worker checks recover memory and paused timers across restart.
+Component checks cover unauthorized reads, shared approval, expiry/deletion,
+deduplication, grant revocation and trigger bounds. Logical memory retention does
+not promise erasure of separately retained task/command history or external backups.
 
 ## 6. Detached UI for active control
 
@@ -268,16 +282,41 @@ duplicate work. Input survives pause and daemon restart; stopping preserves
 history and does not affect the other system. Tool grants and local visibility
 match registry rules. Closing the UI neither stops work nor approves requests.
 
+**Implemented**
+
+`ui --socket ... --listen 127.0.0.1:8080` runs a separate Go HTTP client/server.
+It requires distinct browser/daemon credentials, validates Host/Origin and CSRF,
+escapes content, bounds inert text uploads and preserves command keys on retry.
+System/team controls, memory, schedules, scoped catalogs, learning evidence and
+approvals use only the daemon API. Real UI/daemon processes control two systems;
+repeated creation deduplicates and daemon work completes after UI shutdown.
+
 ## S. Qualification gate before untrusted execution
 
-This gate is not complete and does not schedule the deferred dependency work.
-Revisit the outstanding qualification items in
-[README.md](README.md#before-enabling-untrusted-execution) when explicitly authorized.
-Also complete the router/broker/eventing trust-boundary review recorded in the spec.
+The requested Linux enforcement work is implemented in `resources_linux.go`,
+the launcher/supervisor, and supplemental seccomp rules. It uses delegated cgroups
+and private namespaces directly, not containers or a native-library upgrade.
+The optional profile enforces aggregate activation CPU/memory/PID and workspace
+limits, sealed parent-death cleanup, cancellation of escaped process groups,
+descriptor-based artifact access, and scoped abandoned-workspace cleanup.
+Reviewed profiles without `resources` are not upgraded implicitly.
 
 Require real denial, cleanup, revocation, and delegated-authority checks on every
 claimed supported host profile. Diagnostic success or a support flag is not enough.
 Keep unsupported profiles and unqualified executable paths disabled.
+
+`TestResourceQualification` runs in an automatically collected delegated user
+unit and asserts actual kernel throttling/OOM/PID-denial counters, combined
+scratch/output exhaustion, sealed namespace controls, escaped descendants,
+abrupt supervisor/daemon death, and artifact/accounting recovery. Missing required
+host support fails the integration run. macOS resource enforcement and its
+resolver allowance remain blocked; no macOS qualification is claimed.
+Milestone 7 must require this qualified Linux resource profile for build/run,
+while preserving exact-artifact approval and the phase-4 delegation restrictions.
+`TestGeneratedBuildQualification` compiles a stdlib-only Go candidate in confinement
+and checks actual generated-program filesystem/network/environment denials.
+Changing the toolchain pin fails closed. Ordinary reviewed profiles are not an
+alternative generated-code path.
 
 ## 7. Learning and generated-tool promotion
 
@@ -299,6 +338,30 @@ Show a complete proposal/evaluation/promotion/reuse loop. Rejected candidates st
 unavailable; agent-authored tests cannot replace protected checks. Changed binaries,
 replayed approvals, and missing grants prevent execution. Rollback selects an
 eligible prior revision without rewriting history or granting other systems access.
+
+**Implemented**
+
+Schema 5 adds immutable protected suites, user feedback, evaluation provenance,
+exact approvals and durable task-use allowances. Skill/prompt-fragment comparisons
+run through the ordinary model broker with creation/delegation ancestor budgets.
+Agents with the explicit evaluation grant wait/resume on durable mailbox events;
+they cannot edit protected inputs, approve their own proposals, or gain authority
+through a successful check.
+
+Generated source implements a fixed JSON text transformation ABI. Builds use the
+complete pinned local Go tree, cgo disabled, no downloads/secrets, isolated caches,
+and the qualified resource profile. Protected black-box checks execute fresh
+confined binaries. Approval binds immutable evidence, source, binary, build/runtime
+identity and capabilities; assignment and rollback are separate revision commands.
+Large binary artifacts remain outside SQLite. Shared executable publication is
+not supported; local imports into another system require fresh evaluation/approval.
+
+Real-process scenarios cover proposal/evaluation/resume, private skill reuse after
+restart, explicit version selection and rollback without historical rewrites,
+failed candidates, approval-use limits, scoped generated execution, modified
+binaries, revocation and cancellation of an active confined builder. Component
+checks cover protected-case/evidence immutability, input-tampering denial, atomic
+budget rejection, expiry, stale configuration approvals and ambiguous-build recovery.
 
 ## Working rules and completion
 

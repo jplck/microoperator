@@ -166,6 +166,8 @@ type taskRecord struct {
 	WaitingTool  string        `json:"waiting_tool,omitempty"`
 	Response     string        `json:"response,omitempty"`
 	Reason       string        `json:"reason,omitempty"`
+	LearningID   string        `json:"evaluation_id,omitempty"`
+	LearningRole string        `json:"evaluation_role,omitempty"`
 }
 
 type agentRecord struct {
@@ -186,8 +188,8 @@ type agentRecord struct {
 
 func readTask(ctx context.Context, tx *sql.Tx, systemID, id string) (t taskRecord, err error) {
 	var tools, conversation []byte
-	err = tx.QueryRowContext(ctx, `SELECT system_id,task_id,goal_id,agent_id,agent_revision,parent_task,state,control,tools,conversation,turns,call_id,waiting_tool,response,reason
-	 FROM tasks WHERE system_id=? AND task_id=?`, systemID, id).Scan(&t.SystemID, &t.ID, &t.GoalID, &t.AgentID, &t.Revision, &t.Parent, &t.State, &t.Control, &tools, &conversation, &t.Turns, &t.CallID, &t.WaitingTool, &t.Response, &t.Reason)
+	err = tx.QueryRowContext(ctx, `SELECT system_id,task_id,goal_id,agent_id,agent_revision,parent_task,state,control,tools,conversation,turns,call_id,waiting_tool,response,reason,learning_id,learning_role
+	 FROM tasks WHERE system_id=? AND task_id=?`, systemID, id).Scan(&t.SystemID, &t.ID, &t.GoalID, &t.AgentID, &t.Revision, &t.Parent, &t.State, &t.Control, &tools, &conversation, &t.Turns, &t.CallID, &t.WaitingTool, &t.Response, &t.Reason, &t.LearningID, &t.LearningRole)
 	if err != nil {
 		return t, err
 	}

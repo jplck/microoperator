@@ -29,6 +29,7 @@ var (
 
 type configuration struct {
 	runtimeDigest   string
+	Learning        *learningConfig           `json:"learning,omitempty"`
 	SchemaVersion   int                       `json:"schema_version"`
 	DataDir         string                    `json:"data_dir"`
 	Providers       map[string]providerConfig `json:"providers"`
@@ -63,9 +64,12 @@ type quotaConfig struct {
 }
 
 type sandboxConfig struct {
-	Read      []string `json:"read"`
-	ReadWrite []string `json:"read_write"`
-	Network   string   `json:"network"`
+	Read         []string        `json:"read"`
+	ReadWrite    []string        `json:"read_write"`
+	Network      string          `json:"network"`
+	Resources    *resourceLimits `json:"resources,omitempty"`
+	resourceRoot string
+	toolchain    string
 }
 
 type toolConfig struct {
@@ -74,6 +78,9 @@ type toolConfig struct {
 	Description   string   `json:"description"`
 	Content       string   `json:"content"`
 	RequiresTools []string `json:"requires_tools"`
+	BinaryDigest  string   `json:"binary_digest,omitempty"`
+	ProfileDigest string   `json:"profile_digest,omitempty"`
+	RuntimeDigest string   `json:"runtime_digest,omitempty"`
 }
 
 type operatorConfig struct {
@@ -204,12 +211,31 @@ func loadConfiguration(filename string, lookupEnv func(string) (string, bool)) (
 	return cfg, nil
 }
 
+func (cfg *configuration) prepareResources() error {
+	for name, profile := range cfg.SandboxProfiles {
+		if profile.Resources != nil {
+			root, err := prepareResourceRoot()
+			if err != nil {
+				return fmt.Errorf("sandbox_profiles.%s.resources: %w", name, err)
+			}
+			profile.resourceRoot = root
+			cfg.SandboxProfiles[name] = profile
+		}
+	}
+	return nil
+}
+
 func (cfg configuration) validate(lookupEnv func(string) (string, bool)) error {
 	if cfg.SchemaVersion != 1 {
 		return invalid("schema_version", "must be 1")
 	}
 	if cfg.DataDir == "" || strings.ContainsRune(cfg.DataDir, 0) {
 		return invalid("data_dir", "must be a nonempty path")
+	}
+	if cfg.Learning != nil {
+		if err := validateLearningConfig(*cfg.Learning); err != nil {
+			return err
+		}
 	}
 	for name, provider := range cfg.Providers {
 		if !configName.MatchString(name) {
@@ -361,6 +387,12 @@ func (cfg configuration) validate(lookupEnv func(string) (string, bool)) error {
 }
 
 func validateSandbox(field string, profile sandboxConfig) error {
+	if limits := profile.Resources; limits != nil {
+		if limits.MemoryBytes < 64<<20 || limits.MemoryBytes > 16<<30 || limits.WorkspaceBytes < 1<<20 || limits.WorkspaceBytes > 1<<30 ||
+			limits.WorkspaceBytes > limits.MemoryBytes || limits.Processes < 32 || limits.Processes > 4096 || limits.CPUPercent < 1 || limits.CPUPercent > 1000 {
+			return invalid(field+".resources", "requires memory 64 MiB-16 GiB, workspace 1 MiB-1 GiB (<= memory), 32-4096 processes/threads, and 1-1000 CPU percent")
+		}
+	}
 	if profile.Network != "blocked" {
 		return invalid(field+".network", "only blocked networking is supported")
 	}

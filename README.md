@@ -3,14 +3,13 @@
 A Go daemon with validated configuration, SQLite-backed systems, an authenticated
 local control API, and a shared model broker. Reviewed, nono-go-confined workers
 run bounded tool-using turns and delegate to agents through durable mailboxes.
-Scoped tools/skills, inert local drafts, follow-up input, and system/goal/agent
-controls are implemented. Memory, schedules, generated-code execution, and the UI
-remain future milestones.
+Scoped tools/skills, durable teams, memory, schedules, a detached browser UI, and
+protected learning evaluations are implemented.
 
-**Not ready for untrusted agent code.** Hard resource limits and cleanup after
-supervisor death remain unqualified. The macOS profile also retains resolver IPC.
-On Linux/amd64, the launcher supplements nono-go with a socket-denying seccomp
-filter; this closes the observed Unix-socket gap, not the entire qualification gate.
+**Generated Go requires explicit approval and the resource-confined Linux/amd64
+profile.** The default reviewed-code profile cannot build or run generated tools.
+macOS retains resolver IPC and has no qualified resource profile, so generated
+execution remains blocked there.
 
 ## Run
 
@@ -112,8 +111,9 @@ The API speaks HTTP **only over `state/control.sock`**; there is no TCP listener
 Every request requires `Authorization: Bearer ...`. The token authenticates one
 local administrator; workers instead use daemon-established private pipes, not this
 token. Multi-user roles are not implemented.
-Caller-supplied identity/scope fields are rejected, and browser `Origin` requests
-are refused until the separate UI is implemented.
+Caller-supplied identity/scope fields and direct browser `Origin` requests are
+rejected. The separate UI authenticates browser requests and calls this socket
+server-side; the browser never receives the daemon credential.
 
 From a client shell with the same control token exported:
 
@@ -165,7 +165,7 @@ curl --unix-socket ./state/control.sock \
 
 | Route | Result |
 | --- | --- |
-| `GET /v1/health` | Readiness, reviewed-operator availability, and `untrusted_execution_enabled: false` |
+| `GET /v1/health` | Readiness, execution availability, generated-build availability, and eligible `generated_profiles`; approval/assignment remain mandatory |
 | `GET /v1/launch-configurations` | Named templates, not running instances |
 | `POST /v1/systems` | New runtime-assigned system/operator IDs and optional pending initial goal; returns 201 |
 | `GET /v1/systems` | Up to 20 owned systems; follow `?after=<next>` when `next` is present |
@@ -207,7 +207,8 @@ its grants or configuration. Prompt/goal/skill content is capped at 32 KiB.
 The provider adapter remains `openai-chat-completions`. Administrative `shared.*`
 definitions are skills; reviewed `runtime.*` executables are built into the daemon's
 registry. Pinned skills become system-message instructions, never permission grants.
-Arbitrary executables from configuration and generated source cannot run.
+Arbitrary executable paths cannot be installed through configuration. Generated
+source must pass the separate protected evaluation, approval, and assignment path.
 Profile validation and native support diagnostics are not permission to run
 untrusted code. Model/tool calls use authenticated worker pipes, not a public
 arbitrary-prompt/provider or arbitrary-tool-invocation endpoint.
@@ -326,7 +327,9 @@ All mutations use the existing authenticated, transactional idempotency mechanis
 Draft IDs are runtime-assigned `local.*` identifiers; they cannot shadow `shared.*`
 or `runtime.*`. Draft content is immutable; at most 64 drafts per system, with
 8192-byte content and 2048-byte descriptions. Missing dependencies are rejected;
-skills never auto-install or auto-grant them. Evaluation/promotion is deferred.
+skills never auto-install or auto-grant them. To propose another immutable version,
+include `tool_id` and `expected_version`; there are at most 32 versions per ID and
+64 total draft revisions per system. The learning workflow below owns promotion.
 
 ### Follow-up input and scoped controls
 
@@ -358,10 +361,180 @@ if a result cannot be delivered, its waiting continuation fails explicitly.
 Source IDs, scope, classification, and correlation are daemon-stamped. Neither
 new agents nor restarts reset allowances.
 
-All turns share the original goal deadline (shortest quota wait plus three
-60-second provider allowances). **Pause does not extend this lifetime**; expired
-work/input receives a visible terminal/dead-letter outcome. This is bounded goal
-execution, not standing work or scheduled wakeups.
+All turns share the original goal deadline. The default is the shortest quota
+wait plus three 60-second provider allowances. An authenticated start may set
+`lifetime_seconds` to 1-86400 for scheduled work; agents cannot extend it.
+**Pause does not extend this lifetime**; expired work/input receives a visible
+terminal/dead-letter outcome. Longer lifetimes do not reset turn, event, or token
+budgets, and schedules never start a new goal implicitly.
+
+### Memory and wakeups
+
+Grant these reviewed tools explicitly, like the team tools:
+`runtime.memory.put`, `runtime.memory.search`, `runtime.schedule.create`,
+`runtime.schedule.cancel`, `runtime.events.subscribe`, `runtime.events.unsubscribe`,
+and `runtime.task.wait`.
+
+Memory has `task`, `agent`, and `system` scopes. Worker ownership comes from its
+authenticated task, not supplied IDs. Writes carry content, evidence, confidence
+(0-100), artifact references, and retention (1 second to 365 days). Task/agent
+notes are private to their owner; worker-proposed system notes require human
+approval. Workers cannot overwrite an existing shared fact. Searches authorize
+before matching or pagination and return `untrusted_data:true`, never instructions
+or grants. Bounds are 512 memory IDs/system, 32 revisions/ID, 4096-byte content,
+1024-byte evidence, eight artifact references, and ten results/page within 8 KiB.
+
+Expiry/deletion removes stored memory revisions and their artifact references;
+tombstones prevent resurrection. Original task artifacts, conversations, model
+requests, and command receipts retain their independent history. There is no
+managed backup or secure-erasure facility: deleting a note does not promise
+physical deletion of historical copies or administrator-made backups.
+
+Schedules accept an RFC3339 `at` or a five-field `cron` with an explicit IANA
+`timezone` (UTC by default; `Local`, seconds fields, and `@every` are rejected).
+The pinned `robfig/cron/v3` parser skips nonexistent spring-forward times and
+fires both repeated fall-back times as distinct UTC occurrences. Missed runs
+coalesce into one catch-up event. Occurrence, cursor, trigger allowance, and
+mailbox delivery commit together. Each schedule/subscription allows 1-8 triggers;
+one-shot schedules require one. There are 128 IDs of each kind per system.
+
+Subscriptions support authorized `memory.changed` and same-goal `task.completed`
+notifications, with references rather than leaked contents. Self-memory
+notifications are suppressed. Paused work retains pending wakeups; expiry, stop,
+revocation, event limits, and goal deadlines prevent unauthorized dispatch.
+`runtime.task.wait` persists the continuation and releases its worker. Timers and
+subscriptions are durable SQLite records, not per-agent goroutines or OS cron jobs.
+
+| System-scoped route | Body / result |
+| --- | --- |
+| `GET/POST .../memory` | Search, or write `{scope,content,evidence,confidence,retention_seconds,artifacts?}`; updates also supply `memory_id,expected_revision` |
+| `POST .../memory/<id>/approve` or `/delete` | `{expected_revision}`; explicit review or logical deletion |
+| `GET/POST .../schedules` | Inspect or create `{agent_id?,at?,cron?,timezone?,content,trigger_budget}` |
+| `POST .../schedules/<id>/cancel` | `{}`; preserve history |
+| `GET/POST .../subscriptions` | Inspect or create `{agent_id?,type,scope?,trigger_budget}` |
+| `POST .../subscriptions/<id>/cancel` | `{}`; preserve history |
+
+Here `...` means `/v1/systems/<system_id>`. Administrative memory search supports
+`scope`, `owner_id`, `query`, `after`, and `include_pending`; workers cannot select
+another owner. Trigger listings are cursor-paginated.
+
+### Detached browser UI
+
+Build the binary, leave the daemon running, and start the separate UI process:
+
+```sh
+export MICROOPERATOR_UI_TOKEN="$(openssl rand -hex 32)"
+./microoperator ui --socket "$PWD/state/control.sock" --listen 127.0.0.1:8080
+```
+
+The UI process also needs the daemon's `MICROOPERATOR_CONTROL_TOKEN`, but not its
+provider credentials. The two tokens must differ. Open the printed URL and use
+HTTP Basic username `operator` and the UI token as password. Numeric loopback
+binding, browser authentication, Host/Origin checks, CSRF tokens, escaped HTML,
+and a restrictive CSP are enforced; do not publish this HTTP listener remotely.
+
+Server-rendered forms expose system/team controls, grants, histories, memory,
+wakeups, tools, and learning evidence/approvals. Advanced commands use editable
+JSON, not a frontend framework. A form retry preserves its command key. Optional
+`?refresh=5` refreshes inspection views without resetting command forms.
+Closing the UI does not stop work, approve proposals, or change daemon state.
+
+Text attachments are bounded to 3072 UTF-8 bytes, with a display name but no host
+path. They become inert scoped JSON artifacts and attributed `user.input` events
+in one transaction (`POST .../attachments`, `{agent_id?,name,content}`).
+Uploads never install code or grant filesystem access. Protected evaluation
+inputs cannot be amended through input, attachment, or scheduling commands.
+
+### Governed learning and generated tools
+
+The lifecycle is proposal, protected evaluation, human approval, then explicit
+assignment. Prompt improvements are versioned skill fragments; they do not mutate
+the daemon or silently replace an agent's prompt. Outcomes remain in task/call
+history, and authenticated user feedback records successes as well as failures.
+
+Create immutable protected cases through `POST .../learning/checks`:
+`{"cases":[{"input":"hello","expected":"HELLO"}]}`. There are one or two exact-output
+cases per suite, up to 64 suites/system. Inputs are limited to 1024 bytes and
+expected outputs to 4096 bytes. Candidate-authored tests cannot alter these checks.
+
+Submit a draft, then `POST .../learning/evaluate` with
+`{tool_id,version,check_id,task_id,baseline?}`. The originating task must still be
+live. An optional baseline is an exact originating task pin. Skill evaluations
+compare the fixed current prompt/skills with the candidate in ordinary reviewed
+workers through the shared model broker, quotas, ancestor/system/goal budgets,
+and execution slots. They do not execute model-selected tools. Every candidate
+case must pass; baseline failures and successes both remain visible.
+There are at most four evaluations per goal, within the existing agent/task caps.
+
+An agent granted `runtime.learning.evaluate` may request the same workflow using
+`{tool_id,version,check_id,baseline_name?}`. Identity is derived from its session.
+It waits without occupying a worker; a durable result notification resumes it.
+This grants neither permission to edit protected checks nor authority to approve.
+Human-requested evaluations stay visible for review without automatically waking
+the originating agent.
+
+Generated candidates are bounded Go source in `package main`, implementing:
+
+```go
+func Process(text string) (string, error)
+```
+
+The runtime supplies fixed JSON framing (`{"text":"..."}`), validates bounded
+responses, and provides no broker session. `requires_tools` must be empty.
+Standard-library-only compilation runs in a resource-confined subprocess with
+`CGO_ENABLED=0`, an isolated cache, `GOTOOLCHAIN=local`, and downloads disabled.
+There is no shell, `go generate`, installation hook, or daemon plugin. Protected
+black-box tests run the candidate in fresh sandboxes; expected results are
+compared outside candidate control. A first executable uses text identity as its
+fixed baseline, or an explicitly selected approved generated tool.
+
+To enable builds on the qualified Linux host, use the resource profile below
+with at least a practical build allowance such as 1 GiB RAM, 512 MiB workspace,
+256 processes/threads, and 200 CPU percent. Pin the complete canonical local Go
+tree (including compiler, linker, and sources):
+
+```sh
+./microoperator toolchain-digest "$(realpath "$(go env GOROOT)")"
+```
+
+Add top-level administrative configuration, substituting that path and digest:
+
+```json
+"learning": {
+  "toolchain_root": "/usr/local/go",
+  "toolchain_digest": "<64-character SHA-256 tree digest>"
+}
+```
+
+The toolchain must not overlap daemon state; startup and each build verify its
+identity. Only builders receive this read-only host grant; generated programs do
+not. Builds are bounded to 120 seconds, executions to ten seconds, and binaries
+to 32 MiB. Approved binaries are private digest-addressed files under
+`data_dir/generated/<system_id>/`, outside SQLite. Removing `learning` disables
+new builds, not already approved execution on a qualified profile.
+
+Inspect `GET .../learning` for evidence and its digest. Approve only the exact
+result with `POST .../learning/<evaluation_id>/approve`,
+`{digest,expires_seconds,task_uses}`. Approval lifetime is 1-86400 seconds and its
+allowance is 1-64 distinct tasks. The first model dispatch reserves a task use
+transactionally; continuations/retries do not reset it, and failed tasks do not
+refund it. New-key replay, changed evidence/configuration, disabled drafts, and
+failed candidates cannot renew or obtain approval. A same-key retry merely
+returns the original receipt.
+
+Approval returns an exact `{name,version,digest}` pin but assigns nothing.
+Stop the system, include the local name in the desired system/operator tools,
+and supply `local_tools:[<pin>]` alongside the normal configuration revision.
+Child assignment then uses exact system-granted pins. Rollback selects an eligible
+previous pin through another revision; historical tasks are not rewritten.
+Expiry, disable, revocation, missing grants, changed binaries, and changed
+confinement implementations block subsequent use.
+
+`GET .../learning/checks` and `/feedback` are paginated. Record feedback with
+`POST .../learning/feedback`, `{task_id,rating:"success"|"failure",content}`.
+The UI exposes these commands and evidence. Local publication never happens
+automatically: reviewed skill content may be explicitly imported as administrative
+`shared.*` configuration. Shared generated executables are not supported.
 
 ### Model accounting and recovery
 
@@ -394,7 +567,7 @@ allowances. No timeout, disconnected stream, missing usage, or ambiguous provide
 failure is automatically replayed. Disable hidden gateway retries where possible;
 the daemon cannot observe or guarantee accounting for those external attempts.
 
-SQLite migrates version-1/2 state transactionally to version 3; JSON stays at
+SQLite migrates version-1/2/3/4 state transactionally to version 5; JSON stays at
 `schema_version:1`. On restart, eligible queued work resumes, including safe
 explicit-429 retries, while paused work remains paused. Completed model/tool
 receipts are reused, not redispatched; committed delegation and accepted input
@@ -428,10 +601,12 @@ replace the approved pipes.
 Frames and captured stderr are capped at 64 KiB. Deadline or cancellation kills
 the supervised process group, and the supervisor waits for its direct child.
 The daemon removes activation workspaces after normal completion/cancellation.
-Abrupt daemon death can leave workspace directories; full orphan/resource cleanup
-remains a qualification gap, not permission to execute untrusted programs.
+The resource-confined Linux path additionally kills the whole PID namespace if
+the daemon dies. Its private tmpfs disappears after the last process/descriptor
+closes. Startup, under the exclusive state-directory lock, removes abandoned
+runtime workspaces; persistent artifacts and unrelated files are left intact.
 
-`sandbox-exec`, `sandbox-exec-profile`, `worker operator`, and `tool text-analyze` are internal modes,
+`sandbox-exec`, `sandbox-exec-profile`, `sandbox-build-profile`, `worker operator`, and `tool text-analyze` are internal modes,
 not general-purpose user commands.
 The launcher locks its OS thread, installs any platform restrictions, applies
 nono-go, and immediately execs the target on that thread. Errors abort launch;
@@ -449,6 +624,11 @@ CGO_ENABLED=1 go test -race ./...
 CGO_ENABLED=1 go test -tags=integration -count=1 ./...
 CGO_ENABLED=1 go test -race -tags=integration -count=1 ./...
 ```
+
+Linux integration checks now also require a running systemd user manager with
+`cpu`, `memory`, and `pids` delegation and working user/mount/PID namespaces.
+`TestResourceQualification` creates and collects its own temporary user unit;
+missing support fails the requested integration run instead of silently skipping.
 
 Default tests cover framing, strict configuration, real temporary SQLite
 transactions/migrations, authorization, immutable revisions, pinned grants,
@@ -471,6 +651,13 @@ confused-deputy prevention, immutable assignments/drafts, revocation, delivery
 deduplication/retries/limits, unknown effects, waiting-parent recovery, paused input
 across a real daemon restart, and stopping a waiting team without affecting another
 system. Version-1/2 migrations preserve prior receipts and accounting.
+Memory and timer scenarios cover scope, retention, DST/coalescing and real restart.
+UI scenarios use an actual detached process and prove work continues after it exits.
+Learning scenarios cover agent-requested protected evaluations, budgeted model
+comparisons, approval replay/expiry, restart, explicit rollback, and unchanged task
+history. Linux generated-tool scenarios compile and execute through actual
+resource-confined launchers, reject changed artifacts/toolchains and cancel an
+active builder. No generated candidate is executed in the test runner.
 The daemon acceptance checks ran on Linux/amd64 WSL2; macOS was not rerun.
 Sandbox checks cover filesystem denials, symlink escapes, TCP/UDP/ordinary Unix-connection
 denials, thread/descendant inheritance, environment and descriptor isolation,
@@ -483,16 +670,68 @@ On macOS the suite still **characterizes the remaining Unix-stream socket
 allowance**. No check contacts the real system resolver. Passing this diagnostic
 suite is not approval of the full v1 sandbox profile.
 
-## Before enabling untrusted execution
+## Required profile for generated execution
 
-- Resolve strict macOS network/IPC isolation before enabling untrusted code there.
-  Extra platform deny rules in the current core do not override its later resolver
-  allowance; binding upgrade work remains deferred.
-- Establish hard CPU, memory, disk, and process-count limits. A deadline is not a
-  substitute for these controls.
-- Verify containment of descendants that leave their process group and cleanup
-  after abrupt supervisor death. Current cancellation checks cover descendants
-  that remain in the supervised group.
+Generated build/evaluation/promotion must use the resource-confined Linux profile,
+not the reviewed-code path, and preserve exact-artifact approval and narrowed
+broker authority. Passing evaluation alone does not approve or assign a tool.
+macOS is **not qualified**: its resolver allowance and absent aggregate resource
+enforcement still require implementation and real checks on a macOS host. A
+`resources` request on macOS is explicitly rejected.
+
+### Resource-confined Linux profile
+
+For Linux/amd64, add this object to the selected sandbox profile:
+
+```json
+"resources": {
+  "memory_bytes": 268435456,
+  "workspace_bytes": 8388608,
+  "processes": 128,
+  "cpu_percent": 100
+}
+```
+
+Build first, then run the actual daemon in its own delegated user service (not
+`go run`, whose parent build process would occupy the controller's domain):
+
+```sh
+CGO_ENABLED=1 go build -o microoperator .
+systemd-run --user --wait --pipe --collect \
+  --property='Delegate=cpu memory pids' \
+  --property="WorkingDirectory=$PWD" \
+  --setenv=MICROOPERATOR_CONTROL_TOKEN --setenv=MICROOPERATOR_LLM_KEY \
+  "$PWD/microoperator" daemon --config "$PWD/microoperator.json"
+```
+
+Pass each configured credential environment variable by name. This does not change
+global systemd settings or require sudo. Unavailable delegation, namespaces,
+controllers, mounts, or sandbox setup aborts the requested launch; there is no
+fallback to the ordinary profile.
+
+Each activation's cgroup v2 limits cover its threads and descendants:
+`memory.max` with swap disabled and group OOM killing, `pids.max` (threads count),
+and `cpu.max` using a 100 ms period. `cpu_percent:100` means one CPU's aggregate
+runtime per period, **not** a lifetime CPU-seconds budget. A single private tmpfs
+bounds combined scratch/output storage and 4096 inodes; imported inputs are
+read-only. Bounds are memory 64 MiB-16 GiB, workspace 1 MiB-1 GiB (no larger than
+memory), 32-4096 processes/threads, and 1-1000 CPU percent. Daemon-brokered tool
+processes have their own bounded activation; these are not a daemon-wide RAM cap.
+
+The child enters its cgroup atomically and gets private user/mount/PID/IPC/network namespaces.
+Namespace init carries a sealed SIGKILL parent-death signal; its creating daemon
+thread remains pinned until reap. Descendants cannot escape cleanup by calling
+`setsid`, double-forking, clearing that signal, or changing credentials. Cancellation
+uses `cgroup.kill` and waits for an empty group; restart removes abandoned empty
+groups belonging to dead supervisors, never another live supervisor's group.
+Artifact ingestion uses a retained workspace descriptor, after execution/cleanup,
+rather than confusing the private mount with the host's underlying directory.
+
+Real Linux checks cover namespace identity, sealed controls, aggregate disk
+exhaustion, kernel CPU throttling, memory OOM, process/thread refusal, an escaped
+process group, abrupt supervisor/daemon death, and durable artifact/accounting
+recovery. This qualification applies to the explicit resource profile on the
+checked host, not to nil-resource profiles, macOS, or a support flag alone.
 
 ### Linux/WSL2 recheck
 
@@ -511,7 +750,8 @@ native core commit `1d1c88c9f98f0a1f3ff79cff1509713aaec7cdb0` (0.65.1).
 | IPv4 TCP/UDP and pathname/abstract Unix sockets through the launcher | Denied, including Unix listeners outside the workspace |
 | Alternate socket/descriptor paths | Socket pairs, `io_uring` calls, `pidfd_getfd`, and x32 calls denied; inherited sockets unavailable |
 | Inheritance and cancellation | Filesystem and socket restrictions held in new threads/descendants; supervised process-group cancellation passed |
-| Host resource controls | cgroup v2 exposes CPU, memory, and PID controllers; delegation and workload-limit enforcement were not verified |
+| Resource-confined profile | Delegated cgroup v2 CPU/memory/PID enforcement, bounded private tmpfs, PID-namespace cleanup and abrupt-death recovery passed on this host |
+| Generated tools | Confined pinned-toolchain build, protected tests, exact approval/assignment/reuse, modified-binary denial and active-builder cancellation passed |
 
 Before the fix, a native-only probe using `NetworkBlocked` could deliver a fixed
 payload to pathname and abstract Unix-socket fixtures outside its granted workspace.
@@ -523,8 +763,9 @@ filesystem/network profile. It needs no binding fork, native rebuild, or new dep
 The integration checks use the actual launcher, fresh exec'd workers, temporary
 files, and local fixture sockets with positive controls. No real resolver or
 external provider is contacted. This verifies the listed Linux boundaries, not
-hard resource limits, process-group escape containment, or cleanup after supervisor
-death. macOS behavior was not rerun on this Linux host.
+all profiles indiscriminately. The additional resource qualification above covers
+hard limits, process-group escape containment, and cleanup after supervisor death
+only when that profile is explicitly configured. macOS was not rerun.
 
 ### Deferred macOS binding upgrade
 

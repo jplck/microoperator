@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -175,6 +176,15 @@ func (api *controlAPI) control(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			for _, active := range engine.active {
+				if active.systemID == record.ID && strings.HasPrefix(active.callID, "evaluation_") {
+					task, taskErr := engine.taskSnapshot(r.Context(), record.ID, active.taskID)
+					if taskErr != nil {
+						api.logger.Printf("evaluation control lookup: %v", taskErr)
+						active.cancel()
+					} else if taskTerminal(task.State) || task.Control == "stopped" {
+						active.cancel()
+					}
+				}
 				for _, call := range result.Calls {
 					if active.callID == call {
 						active.cancel()

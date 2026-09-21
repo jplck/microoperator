@@ -298,7 +298,7 @@ func TestInitialGoalBudgetAndCommandReplay(t *testing.T) {
 	}
 	def := record.Configuration
 	def.Limits.TokenBudget = 60000
-	revised, err := b.store.reviseSystem(context.Background(), localAdministrator, "revise", record.ID, reviseSystemCommand{1, &def}, cfg, id)
+	revised, err := b.store.reviseSystem(context.Background(), localAdministrator, "revise", record.ID, reviseSystemCommand{ExpectedRevision: 1, Configuration: &def}, cfg, id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -502,7 +502,7 @@ func TestStoreMigrationFromPopulatedVersionOne(t *testing.T) {
 	if err := migrated.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if keys != 1 || version != 3 {
+	if keys != 1 || version != 5 {
 		t.Fatalf("migration enforcement/version = %d/%d", keys, version)
 	}
 	if _, err := migrated.db.Exec(`DELETE FROM audit`); err == nil {

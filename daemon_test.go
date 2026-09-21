@@ -111,7 +111,7 @@ func TestControlAuthorizationValidationAndRevisions(t *testing.T) {
 	next := first.Configuration
 	next.Operator.Prompt = "Explicitly changed."
 	next.Operator.Tools = []string{}
-	update := fixtureJSON(t, reviseSystemCommand{first.Revision, &next})
+	update := fixtureJSON(t, reviseSystemCommand{ExpectedRevision: first.Revision, Configuration: &next})
 	path := "/v1/systems/" + first.ID + "/configuration"
 	revised := decodeSystemResponse(t, controlRequest(handler, "PUT", path, "revise", update, fixtureControlToken), http.StatusOK)
 	if revised.Revision != 2 || len(revised.Grants.OperatorTools) != 0 || revised.State != "inactive" {

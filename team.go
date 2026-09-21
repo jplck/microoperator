@@ -70,6 +70,12 @@ func (engine *executionEngine) claim(ctx context.Context, now time.Time) (record
 		return record, e, false, err
 	}
 	defer rollback(tx, &err)
+	if err := engine.pumpWakeups(ctx, tx, now); err != nil {
+		return record, e, false, err
+	}
+	if err := engine.pumpLearning(ctx, tx, now); err != nil {
+		return record, e, false, err
+	}
 	rows, err := tx.QueryContext(ctx, `SELECT m.system_id,m.event_id,m.task_id,v.type,v.payload,v.expires_at,m.attempts,m.applied
 	 FROM mailboxes m JOIN events v ON v.system_id=m.system_id AND v.event_id=m.event_id JOIN systems s ON s.system_id=m.system_id
 	 JOIN tasks t ON t.system_id=m.system_id AND t.task_id=m.task_id
@@ -80,7 +86,7 @@ func (engine *executionEngine) claim(ctx context.Context, now time.Time) (record
 	 AND (t.state IN ('completed','failed','canceled','rejected') OR t.control='stopped' OR a.state='stopped' OR g.control='stopped'
 	  OR s.state IN ('stopping','stopped') OR v.expires_at<=? OR m.attempts>=3
 	  OR (s.state='running' AND a.state='active' AND t.control='active' AND g.control='active'
-	   AND (t.state!='waiting' OR v.type IN ('task.result','task.progress'))))
+	   AND (t.state!='waiting' OR t.waiting_tool='' OR v.type IN ('task.result','task.progress'))))
 	 ORDER BY s.last_admission,m.sequence LIMIT 512`, now.UnixMilli(), now.UnixMilli())
 	if err != nil {
 		return record, e, false, err
@@ -147,14 +153,47 @@ func (engine *executionEngine) claim(ctx context.Context, now time.Time) (record
 		if active >= record.Configuration.Limits.MaxActiveAgents {
 			continue
 		}
+		if c.kind == "tool.evaluate" {
+			e, err = engine.claimLearning(ctx, tx, record, t, c, now)
+			if err != nil {
+				if !deniedTask(err) {
+					return record, e, false, err
+				}
+				if err := terminateTask(ctx, tx, t, "failed", "", err.Error(), "runtime", c.eventID, now); err != nil {
+					return record, e, false, err
+				}
+				continue
+			}
+			found = true
+			break
+		}
 		if c.kind == "task.progress" {
 			if _, err := tx.ExecContext(ctx, `UPDATE mailboxes SET state='acked',applied=1 WHERE system_id=? AND event_id=?`, t.SystemID, c.eventID); err != nil {
 				return record, e, false, err
 			}
 			continue
 		}
-		if t.State == "waiting" && c.kind != "task.result" {
+		if t.State == "waiting" && t.WaitingTool != "" && c.kind != "task.result" {
 			continue
+		}
+		if t.State == "waiting" && t.WaitingTool == "" {
+			wakeErr := engine.consumeInputs(ctx, tx, &t, "")
+			if wakeErr == nil {
+				wakeErr = prepareNextCall(ctx, tx, engine.cfg, t, engine.owner, now)
+			}
+			if wakeErr != nil {
+				if !deniedTask(wakeErr) {
+					return record, e, false, wakeErr
+				}
+				if err := terminateTask(ctx, tx, t, "rejected", "", wakeErr.Error(), "runtime", c.eventID, now); err != nil {
+					return record, e, false, err
+				}
+				continue
+			}
+			t, err = readTask(ctx, tx, t.SystemID, t.ID)
+			if err != nil {
+				return record, e, false, err
+			}
 		}
 		if c.kind == "task.result" && c.applied == 0 {
 			var payload struct {
@@ -204,7 +243,7 @@ func (engine *executionEngine) claim(ctx context.Context, now time.Time) (record
 				return record, e, false, err
 			}
 		}
-		if c.kind != "task.ready" && c.kind != "task.continue" && c.kind != "task.result" && c.kind != "user.input" {
+		if c.kind != "task.ready" && c.kind != "task.continue" && c.kind != "task.result" && c.kind != "user.input" && c.kind != "schedule.fired" && c.kind != "memory.changed" && c.kind != "task.notice" {
 			return record, e, false, errors.New("unsupported stored event type")
 		}
 		e, err = readExecution(ctx, tx, t.SystemID, t.CallID)
@@ -293,7 +332,7 @@ func (engine *executionEngine) claim(ctx context.Context, now time.Time) (record
 
 func (engine *executionEngine) consumeInputs(ctx context.Context, tx *sql.Tx, t *taskRecord, exclude string) error {
 	rows, err := tx.QueryContext(ctx, `SELECT m.event_id,e.payload FROM mailboxes m JOIN events e ON e.system_id=m.system_id AND e.event_id=m.event_id
-	 WHERE m.system_id=? AND m.task_id=? AND m.state='pending' AND m.applied=0 AND e.type='user.input' AND m.event_id!=? ORDER BY m.sequence`, t.SystemID, t.ID, exclude)
+	 WHERE m.system_id=? AND m.task_id=? AND m.state='pending' AND m.applied=0 AND e.type IN ('user.input','schedule.fired','memory.changed','task.notice') AND m.event_id!=? ORDER BY m.sequence`, t.SystemID, t.ID, exclude)
 	if err != nil {
 		return err
 	}
@@ -438,10 +477,28 @@ func (engine *executionEngine) finishDelivery(ctx context.Context, session execu
 		} else {
 			var pending int
 			if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM mailboxes m JOIN events v ON m.system_id=v.system_id AND m.event_id=v.event_id
-			 WHERE m.system_id=? AND m.task_id=? AND m.state='pending' AND v.type='user.input'`, t.SystemID, t.ID).Scan(&pending); err != nil {
+			 WHERE m.system_id=? AND m.task_id=? AND m.state='pending' AND v.type IN ('user.input','schedule.fired','memory.changed','task.notice')`, t.SystemID, t.ID).Scan(&pending); err != nil {
 				return err
 			}
 			if pending == 0 {
+				var triggers int
+				if err := tx.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM schedules WHERE system_id=? AND task_id=? AND state='active')+
+				 (SELECT count(*) FROM subscriptions WHERE system_id=? AND task_id=? AND state='active')`, t.SystemID, t.ID, t.SystemID, t.ID).Scan(&triggers); err != nil {
+					return err
+				}
+				if triggers > 0 {
+					t.Conversation = append(t.Conversation, chatMessage{Role: "assistant", Content: e.Response})
+					if err := updateConversation(ctx, tx, t); err != nil {
+						return err
+					}
+					if _, err := tx.ExecContext(ctx, `UPDATE tasks SET state='waiting',waiting_tool='',reason='awaiting scheduled or subscribed input' WHERE system_id=? AND task_id=?`, t.SystemID, t.ID); err != nil {
+						return err
+					}
+					if err := auditExecution(ctx, tx, t.SystemID, t.AgentID, "task.waiting", e.Revision, now); err != nil {
+						return err
+					}
+					return tx.Commit()
+				}
 				state = "completed"
 			} else {
 				t.Conversation = append(t.Conversation, chatMessage{Role: "assistant", Content: e.Response})
@@ -484,6 +541,11 @@ func (engine *executionEngine) finishDelivery(ctx context.Context, session execu
 	if err := terminateTask(ctx, tx, t, state, e.Response, reason, t.AgentID, session.EventID, now); err != nil {
 		return err
 	}
+	if state == "completed" {
+		if err := engine.notifySubscriptions(ctx, tx, t, "task.completed", "", "", session.EventID, t.ID, now); err != nil {
+			return err
+		}
+	}
 	if stopped && t.Parent == "" {
 		if _, err := tx.ExecContext(ctx, `UPDATE systems SET state=CASE WHEN EXISTS(SELECT 1 FROM mailboxes WHERE system_id=? AND state='leased')
 		 THEN 'stopping' ELSE 'stopped' END WHERE system_id=?`, t.SystemID, t.SystemID); err != nil {
@@ -510,14 +572,16 @@ func (store *stateStore) recoverExecutions(ctx context.Context) (err error) {
 	}
 	defer rollback(tx, &err)
 	if _, err := tx.ExecContext(ctx, `
+	 UPDATE tasks SET state='failed',reason='daemon restarted during generated build; not retried' WHERE learning_role='build0' AND state='running';
+	 UPDATE mailboxes SET state='dead',reason='generated build outcome unknown'
+	  WHERE EXISTS(SELECT 1 FROM tasks t WHERE t.system_id=mailboxes.system_id AND t.task_id=mailboxes.task_id AND t.learning_role='build0' AND t.state='failed');
 	 UPDATE model_attempts SET state='unknown' WHERE state='running';
 	 UPDATE model_calls SET state='unknown',reason='daemon restarted after dispatch; outcome requires reconciliation' WHERE state='running';
 	 UPDATE tool_calls SET state='unknown',result='daemon restarted during tool dispatch; not retried' WHERE state='running';
 	 UPDATE mailboxes SET state='pending',lease_owner='',lease_until=0 WHERE state='leased';
 	 UPDATE mailboxes SET state='acked' WHERE state='pending' AND applied=1
 	  AND EXISTS(SELECT 1 FROM tasks t JOIN tool_calls c ON c.system_id=t.system_id AND c.call_id=t.call_id
-	   WHERE t.system_id=mailboxes.system_id AND t.task_id=mailboxes.task_id AND t.state='waiting' AND c.state='completed')
-	  AND event_id IN (SELECT event_id FROM events WHERE type IN ('task.ready','task.continue','task.result'));
+	   WHERE t.system_id=mailboxes.system_id AND t.task_id=mailboxes.task_id AND t.state='waiting' AND c.state='completed');
 	 UPDATE tasks SET state='queued' WHERE state='running';`); err != nil {
 		return err
 	}

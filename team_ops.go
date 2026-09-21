@@ -56,6 +56,18 @@ func checkTaskAdmission(ctx context.Context, tx *sql.Tx, cfg configuration, e ex
 	if t.Control == "stopped" || a.State == "stopped" || goalControl == "stopped" || taskTerminal(t.State) {
 		return "task or agent stopped", nil
 	}
+	if t.LearningID != "" {
+		evaluation, err := readEvaluation(ctx, tx, t.SystemID, t.LearningID)
+		if err == nil {
+			err = learningEligible(ctx, tx, cfg, t.SystemID, evaluation, time.Now())
+		}
+		if err != nil {
+			if deniedTask(err) {
+				return err.Error(), nil
+			}
+			return "", err
+		}
+	}
 	// A claimed activation may finish while paused; pause prevents the next claim.
 	if err := authorizePins(ctx, tx, cfg, e.SystemID, t.Tools); err != nil {
 		var field *fieldError
@@ -199,6 +211,48 @@ type delegateArgs struct {
 
 func (engine *executionEngine) builtin(ctx context.Context, tx *sql.Tx, e executionRecord, t taskRecord, name, arguments string) (string, error) {
 	switch name {
+	case "runtime.learning.evaluate":
+		var args struct {
+			ToolID   string `json:"tool_id"`
+			Version  int64  `json:"version"`
+			CheckID  string `json:"check_id"`
+			Baseline string `json:"baseline_name"`
+		}
+		if err := decodeJSON([]byte(arguments), &args); err != nil {
+			return "", err
+		}
+		command := evaluateCommand{ToolID: args.ToolID, Version: args.Version, CheckID: args.CheckID, TaskID: t.ID}
+		if args.Baseline != "" {
+			for _, pin := range t.Tools {
+				if pin.Name == args.Baseline {
+					copy := pin
+					command.Baseline = &copy
+				}
+			}
+			if command.Baseline == nil {
+				return "", invalid("baseline", "not an exact task grant")
+			}
+		}
+		record, err := readSystem(ctx, tx, localAdministrator, t.SystemID)
+		if err != nil {
+			return "", err
+		}
+		value, err := queueLearning(ctx, tx, engine, record, command, t.AgentID, time.Now())
+		if err != nil {
+			return "", err
+		}
+		result, err := toolOutcome(value)
+		if err != nil {
+			return "", err
+		}
+		appendToolResult(&t, e, result)
+		if err := updateConversation(ctx, tx, t); err != nil {
+			return "", err
+		}
+		_, err = tx.ExecContext(ctx, `UPDATE tasks SET state='waiting',waiting_tool='',reason='waiting for protected evaluation' WHERE system_id=? AND task_id=?`, t.SystemID, t.ID)
+		return result, err
+	case "runtime.memory.put", "runtime.memory.search", "runtime.schedule.create", "runtime.schedule.cancel", "runtime.events.subscribe", "runtime.events.unsubscribe", "runtime.task.wait":
+		return engine.knowledgeTool(ctx, tx, e, t, name, arguments)
 	case "runtime.agent.list":
 		var args struct {
 			After string `json:"after"`
@@ -457,11 +511,16 @@ func (engine *executionEngine) invokeTool(ctx context.Context, session execution
 	if err := authorizePins(ctx, tx, engine.cfg, e.SystemID, t.Tools); err != nil {
 		return "", err
 	}
-	pin, err := resolveTool(engine.cfg, t.Tools, action.Function.Name)
+	locals, err := loadLocalTools(ctx, tx, e.SystemID, t.Tools)
 	if err != nil {
 		return "", err
 	}
-	definition, _ := engine.cfg.tool(pin.Name)
+	cfg := engine.cfg.withLocalTools(locals)
+	pin, err := resolveTool(cfg, t.Tools, action.Function.Name)
+	if err != nil {
+		return "", err
+	}
+	definition, _ := cfg.tool(pin.Name)
 	schema, err := executableSchema(pin.Name, definition)
 	if err != nil {
 		return "", err
@@ -494,7 +553,8 @@ func (engine *executionEngine) invokeTool(ctx context.Context, session execution
 	 VALUES(?,?,?,?,?,?,?,'running')`, e.SystemID, e.CallID, action.ID, t.ID, pin.Name, pin.Version, hash); err != nil {
 		return "", err
 	}
-	if pin.Name != "runtime.text.analyze" {
+	generated := strings.HasPrefix(pin.Name, "local.")
+	if pin.Name != "runtime.text.analyze" && !generated {
 		result, err = engine.builtin(ctx, tx, e, t, pin.Name, action.Function.Arguments)
 		if err != nil {
 			return "", err
@@ -519,6 +579,30 @@ func (engine *executionEngine) invokeTool(ctx context.Context, session execution
 		return "", err
 	}
 	profile := engine.cfg.SandboxProfiles[a.Definition.SandboxProfile]
+	var binary []byte
+	if generated {
+		if definition.RuntimeDigest != engine.cfg.runtimeDigest {
+			return "", invalid("runtime", "approved confinement implementation changed")
+		}
+		digest, _, err := jsonDigest(profile)
+		if err != nil {
+			return "", err
+		}
+		if definition.ProfileDigest != digest {
+			return "", invalid("profile", "approved capabilities do not match this task")
+		}
+		var used int
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM learning_uses WHERE system_id=? AND tool_id=? AND version=? AND task_id=?`, t.SystemID, pin.Name, pin.Version, t.ID).Scan(&used); err != nil {
+			return "", err
+		}
+		if used != 1 {
+			return "", invalid("approval", "task has no reserved approval use")
+		}
+		binary, err = readGeneratedArtifact(engine.cfg.DataDir, t.SystemID, definition.BinaryDigest)
+		if err != nil {
+			return "", err
+		}
+	}
 	writable := false
 	for _, path := range profile.ReadWrite {
 		if path == "output" {
@@ -534,7 +618,15 @@ func (engine *executionEngine) invokeTool(ctx context.Context, session execution
 	if err := tx.Commit(); err != nil {
 		return "", err
 	}
-	output, artifact, runErr := engine.runTextTool(ctx, e, args, profile)
+	var output textResult
+	var artifact []byte
+	var generatedOutput string
+	var runErr error
+	if generated {
+		generatedOutput, runErr = runGenerated(ctx, engine.executable, engine.cfg.DataDir, t.SystemID, binary, args.Text, profile)
+	} else {
+		output, artifact, runErr = engine.runTextTool(ctx, e, args, profile)
+	}
 	finishCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	finish, err := engine.store.db.BeginTx(finishCtx, nil)
@@ -560,7 +652,11 @@ func (engine *executionEngine) invokeTool(ctx context.Context, session execution
 		}
 		output.Artifact = id
 	}
-	result, err = toolOutcome(output)
+	if generated {
+		result, err = toolOutcome(map[string]string{"text": generatedOutput})
+	} else {
+		result, err = toolOutcome(output)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -590,6 +686,12 @@ func terminateTask(ctx context.Context, tx *sql.Tx, t taskRecord, state, respons
 	if taskTerminal(t.State) {
 		return nil
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE schedules SET state='canceled',reason='owning task is terminal' WHERE system_id=? AND task_id=? AND state='active'`, t.SystemID, t.ID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE subscriptions SET state='canceled',reason='owning task is terminal' WHERE system_id=? AND task_id=? AND state='active'`, t.SystemID, t.ID); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET state=?,response=?,reason=? WHERE system_id=? AND task_id=?`, state, response, reason, t.SystemID, t.ID); err != nil {
 		return err
 	}
@@ -599,6 +701,9 @@ func terminateTask(ctx context.Context, tx *sql.Tx, t taskRecord, state, respons
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE mailboxes SET state='dead',reason=? WHERE system_id=? AND task_id=? AND state='pending'`, "task is terminal: "+state, t.SystemID, t.ID); err != nil {
 		return err
+	}
+	if t.LearningID != "" {
+		return nil
 	}
 	if t.Parent != "" {
 		parent, err := readTask(ctx, tx, t.SystemID, t.Parent)

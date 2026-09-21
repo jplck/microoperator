@@ -96,12 +96,26 @@ func applyPlatformSandbox() error {
 	// Each pair below means "if this is the syscall, return EPERM; otherwise skip
 	// that return and compare the next number". Inherited descriptors must still
 	// be handled separately by closeOnExecDescriptors before exec.
-	for _, number := range []uint32{syscall.SYS_SOCKET, syscall.SYS_SOCKETPAIR, 425, 426, 427, 438} {
+	for _, number := range []uint32{syscall.SYS_SOCKET, syscall.SYS_SOCKETPAIR, 425, 426, 427, 438,
+		syscall.SYS_UNSHARE, 308, syscall.SYS_MOUNT, syscall.SYS_UMOUNT2, syscall.SYS_PIVOT_ROOT,
+		syscall.SYS_SETUID, syscall.SYS_SETGID, syscall.SYS_SETREUID, syscall.SYS_SETREGID, syscall.SYS_SETRESUID, syscall.SYS_SETRESGID, syscall.SYS_SETFSUID, syscall.SYS_SETFSGID,
+		syscall.SYS_SETXATTR, syscall.SYS_LSETXATTR, syscall.SYS_FSETXATTR,
+		428, 429, 430, 431, 432, 442,
+	} {
 		filter = append(filter,
 			syscall.SockFilter{Code: syscall.BPF_JMP | syscall.BPF_JEQ | syscall.BPF_K, K: number, Jf: 1},
 			syscall.SockFilter{Code: syscall.BPF_RET | syscall.BPF_K, K: deny},
 		)
 	}
+	// Namespace init must not clear its parent-death signal, directly or by
+	// changing credentials. Other prctl operations (including nono setup) remain
+	// available. seccomp_data.args[0] starts at offset 16.
+	filter = append(filter,
+		syscall.SockFilter{Code: syscall.BPF_JMP | syscall.BPF_JEQ | syscall.BPF_K, K: syscall.SYS_PRCTL, Jf: 3},
+		syscall.SockFilter{Code: syscall.BPF_LD | syscall.BPF_W | syscall.BPF_ABS, K: 16},
+		syscall.SockFilter{Code: syscall.BPF_JMP | syscall.BPF_JEQ | syscall.BPF_K, K: 1, Jf: 1},
+		syscall.SockFilter{Code: syscall.BPF_RET | syscall.BPF_K, K: deny},
+	)
 	// ALLOW means only that THIS filter has no objection. Other seccomp filters,
 	// Landlock rules installed by nono, and ordinary OS permissions still apply.
 	// Filters stack; a later filter cannot restore access denied by this one.

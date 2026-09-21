@@ -48,6 +48,7 @@ type initialGoal struct {
 }
 
 type systemRecord struct {
+	localTools      map[string]toolConfig
 	ID              string           `json:"system_id"`
 	OperatorID      string           `json:"operator_id"`
 	Launch          string           `json:"launch"`
@@ -74,6 +75,7 @@ type createSystemCommand struct {
 type reviseSystemCommand struct {
 	ExpectedRevision int64         `json:"expected_revision"`
 	Configuration    *systemConfig `json:"configuration"`
+	LocalTools       []toolPin     `json:"local_tools,omitempty"`
 }
 
 type stateStore struct{ db *sql.DB }
@@ -250,13 +252,20 @@ func (store *stateStore) migrate(ctx context.Context) (err error) {
 		}
 		fallthrough
 	case 2:
+		if _, err := tx.ExecContext(ctx, schemaV3); err != nil {
+			return fmt.Errorf("apply schema migration 3: %w", err)
+		}
 		fallthrough
 	case 3:
-		if version < 3 {
-			if _, err := tx.ExecContext(ctx, schemaV3); err != nil {
-				return fmt.Errorf("apply schema migration 3: %w", err)
-			}
+		if _, err := tx.ExecContext(ctx, schemaV4); err != nil {
+			return fmt.Errorf("apply schema migration 4: %w", err)
 		}
+		fallthrough
+	case 4:
+		if _, err := tx.ExecContext(ctx, schemaV5); err != nil {
+			return fmt.Errorf("apply schema migration 5: %w", err)
+		}
+	case 5:
 	default:
 		return fmt.Errorf("unsupported database schema version %d", version)
 	}
@@ -345,6 +354,7 @@ func (cfg configuration) grantsFor(definition systemConfig) (systemGrants, error
 // cannot silently substitute a new model, profile, tool version, or quota policy.
 // A later explicit revision binds the user's selection to the new definitions.
 func (cfg configuration) inspect(record systemRecord) (systemRecord, error) {
+	cfg = cfg.withLocalTools(record.localTools)
 	record.RemainingTokens = record.Configuration.Limits.TokenBudget - record.UsedTokens - record.ReservedTokens
 	if err := cfg.validateSystem(record.Configuration); err != nil {
 		record.BlockedReason = err.Error()
@@ -383,7 +393,8 @@ func (store *stateStore) command(ctx context.Context, principal, key, requestHas
 		if err := json.Unmarshal(response, &result); err != nil {
 			return result, fmt.Errorf("decode command receipt: %w", err)
 		}
-		return result, nil
+		result.localTools, err = loadLocalTools(ctx, tx, result.ID, result.Grants.SystemTools)
+		return result, err
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return result, fmt.Errorf("read command receipt: %w", err)
@@ -490,6 +501,12 @@ func (store *stateStore) reviseSystem(ctx context.Context, principal, key, syste
 		if command.Configuration == nil {
 			return record, invalid("configuration", "is required")
 		}
+		locals, err := loadLocalTools(ctx, tx, record.ID, append(append([]toolPin{}, record.Grants.SystemTools...), command.LocalTools...))
+		if err != nil {
+			return record, err
+		}
+		cfg = cfg.withLocalTools(locals)
+		record.localTools = locals
 		if err := cfg.validateSystem(*command.Configuration); err != nil {
 			return record, err
 		}
@@ -559,6 +576,10 @@ func readSystem(ctx context.Context, tx *sql.Tx, principal, systemID string) (sy
 	}
 	if err := json.Unmarshal(grants, &record.Grants); err != nil {
 		return record, fmt.Errorf("decode persisted grants: %w", err)
+	}
+	record.localTools, err = loadLocalTools(ctx, tx, record.ID, record.Grants.SystemTools)
+	if err != nil {
+		return record, err
 	}
 	var goal initialGoal
 	err = tx.QueryRowContext(ctx, `SELECT goal_id, system_id, prompt, state, token_budget

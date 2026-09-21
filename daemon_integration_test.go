@@ -37,7 +37,7 @@ type daemonFixture struct {
 
 func startDaemonFixture(t *testing.T, filename, token string) *daemonFixture {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
 	fixture := &daemonFixture{cancel: cancel, done: make(chan struct{})}
 	fixture.cmd = exec.CommandContext(ctx, microoperatorBinary, "daemon", "--config", filename)
 	fixture.cmd.Env = []string{"LANG=C", "TZ=UTC", controlTokenEnv + "=" + token, fixtureProviderEnv + "=" + fixtureProviderSecret}
@@ -208,7 +208,7 @@ func TestDaemonSystemsSurviveRestartWithoutExecution(t *testing.T) {
 	next := first.Configuration
 	next.Operator.Prompt = "Only the first instance changes."
 	next.Limits.TokenBudget = 45000
-	update := reviseSystemCommand{1, &next}
+	update := reviseSystemCommand{ExpectedRevision: 1, Configuration: &next}
 	revised := daemonSystem(t, firstDaemon, fixtureControlToken, "PUT", "/v1/systems/"+first.ID+"/configuration",
 		"revise-first", update, http.StatusOK)
 	if runtime.GOOS == "linux" {
@@ -303,7 +303,7 @@ func TestRetiredDemoCommandsAreRejected(t *testing.T) {
 			err := cmd.Run()
 			var exitErr *exec.ExitError
 			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || stdout.Len() != 0 ||
-				stderr.String() != "usage: microoperator daemon --config PATH\n" {
+				stderr.String() != "usage: microoperator daemon --config PATH | ui --socket PATH [--listen 127.0.0.1:8080] | toolchain-digest ABSOLUTE_GOROOT\n" {
 				t.Fatalf("retired entry point: err=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
 			}
 		})
