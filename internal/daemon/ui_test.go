@@ -189,6 +189,11 @@ func TestUIAuthenticationCSRFAndDurableCommands(t *testing.T) {
 		}
 	}
 	start := url.Values{"kind": {"start"}, "path": {"/v1/systems/" + id + "/start"}, "method": {"POST"}, "return": {"/systems/" + id}, "key": {"ui-start"}, "csrf": {csrf}, "expected_revision": {"1"}, "lifetime_seconds": {"3600"}}
+	start.Set("continuous", "invalid")
+	if status, body := uiResponse(t, ui, "POST", "/command", start, ""); status != 400 {
+		t.Fatalf("UI accepted invalid continuous mode: %d %s", status, body)
+	}
+	start.Set("continuous", "true")
 	if status, body := uiResponse(t, ui, "POST", "/command", start, ""); status != 202 {
 		t.Fatalf("UI start: %s", body)
 	}
@@ -197,7 +202,7 @@ func TestUIAuthenticationCSRFAndDurableCommands(t *testing.T) {
 		t.Fatalf("UI pause: %s", body)
 	}
 	record, err := engine.store.GetSystem(context.Background(), localAdministrator, id)
-	if err != nil || record.State != "paused" {
+	if err != nil || record.State != "paused" || !record.Continuous {
 		t.Fatalf("UI did not control daemon state: %+v %v", record, err)
 	}
 	assertCount(t, engine.store, "model_attempts", 0)

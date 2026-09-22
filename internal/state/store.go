@@ -50,6 +50,8 @@ type SystemRecord struct {
 	ID              string                `json:"system_id"`
 	OperatorID      string                `json:"operator_id"`
 	State           string                `json:"state"`
+	Continuous      bool                  `json:"continuous,omitempty"`
+	Idle            bool                  `json:"idle,omitempty"`
 	Revision        int64                 `json:"revision"`
 	ConfigurationID string                `json:"configuration_id"`
 	Configuration   SystemConfig          `json:"configuration"`
@@ -264,7 +266,12 @@ func (store *Store) migrate(ctx context.Context) (err error) {
 		if _, err := tx.ExecContext(ctx, schemaV5); err != nil {
 			return fmt.Errorf("apply schema migration 5: %w", err)
 		}
+		fallthrough
 	case 5:
+		if _, err := tx.ExecContext(ctx, schemaV6); err != nil {
+			return fmt.Errorf("apply schema migration 6: %w", err)
+		}
+	case 6:
 	default:
 		return fmt.Errorf("unsupported database schema version %d", version)
 	}
@@ -313,15 +320,30 @@ func NewID(prefix string) (string, error) {
 	return prefix + hex.EncodeToString(bytes[:]), nil
 }
 
+type modelDefinition struct {
+	Model    ModelConfig            `json:"model"`
+	Provider ProviderConfig         `json:"provider"`
+	Quotas   map[string]QuotaConfig `json:"quotas"`
+}
+
+func (cfg Configuration) modelDefinition(name string) modelDefinition {
+	model := cfg.Models[name]
+	quotas := make(map[string]QuotaConfig)
+	for _, group := range model.QuotaGroups {
+		quotas[group] = cfg.QuotaGroups[group]
+	}
+	return modelDefinition{model, cfg.Providers[model.Provider], quotas}
+}
+
 func (cfg Configuration) GrantsFor(definition SystemConfig) (SystemGrants, error) {
 	grants := SystemGrants{
 		Model: definition.Operator.Model, SandboxProfile: definition.Operator.SandboxProfile,
 		SystemTools: []ToolPin{}, OperatorTools: []ToolPin{},
 	}
-	model := cfg.Models[definition.Operator.Model]
-	quotas := make(map[string]QuotaConfig)
-	for _, name := range model.QuotaGroups {
-		quotas[name] = cfg.QuotaGroups[name]
+	initial := cfg.modelDefinition(definition.Operator.Model)
+	models := make(map[string]modelDefinition)
+	for _, name := range definition.Models {
+		models[name] = cfg.modelDefinition(name)
 	}
 	tools := make(map[string]ToolConfig)
 	pins := make(map[string]ToolPin)
@@ -339,12 +361,13 @@ func (cfg Configuration) GrantsFor(definition SystemConfig) (SystemGrants, error
 		grants.OperatorTools = append(grants.OperatorTools, pins[name])
 	}
 	digest, _, err := JsonDigest(struct {
-		Model    ModelConfig            `json:"model"`
-		Provider ProviderConfig         `json:"provider"`
-		Quotas   map[string]QuotaConfig `json:"quotas"`
-		Profile  SandboxConfig          `json:"profile"`
-		Tools    map[string]ToolConfig  `json:"tools"`
-	}{model, cfg.Providers[model.Provider], quotas, cfg.SandboxProfiles[definition.Operator.SandboxProfile], tools})
+		Model    ModelConfig                `json:"model"`
+		Provider ProviderConfig             `json:"provider"`
+		Quotas   map[string]QuotaConfig     `json:"quotas"`
+		Profile  SandboxConfig              `json:"profile"`
+		Tools    map[string]ToolConfig      `json:"tools"`
+		Models   map[string]modelDefinition `json:"models,omitempty"`
+	}{initial.Model, initial.Provider, initial.Quotas, cfg.SandboxProfiles[definition.Operator.SandboxProfile], tools, models})
 	grants.DefinitionsDigest = digest
 	return grants, err
 }
@@ -589,6 +612,13 @@ func readSystem(ctx context.Context, tx *sql.Tx, principal, systemID string) (Sy
 	execution, err := readExecution(ctx, tx, systemID, "")
 	if err == nil {
 		record.Execution = &execution
+		record.Continuous = execution.Continuous
+		if record.Continuous && (record.State == "running" || record.State == "paused") {
+			if err := tx.QueryRowContext(ctx, `SELECT NOT EXISTS(SELECT 1 FROM tasks WHERE system_id=? AND goal_id=? AND state IN ('queued','running','waiting'))`,
+				systemID, execution.GoalID).Scan(&record.Idle); err != nil {
+				return record, err
+			}
+		}
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return record, err
 	}

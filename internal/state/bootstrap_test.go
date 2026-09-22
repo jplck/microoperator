@@ -152,7 +152,7 @@ func TestBootstrapToolsStayScopedAndReplayArtifacts(t *testing.T) {
 		Approve bool      `json:"exact_artifact_approval_required"`
 		Tokens  int64     `json:"remaining_tokens"`
 	}
-	if err := json.Unmarshal([]byte(content), &caps); err != nil || len(caps.Tools) != 12 ||
+	if err := json.Unmarshal([]byte(content), &caps); err != nil || len(caps.Tools) != 15 ||
 		caps.Build || caps.Blocker == "" || !caps.Approve || caps.Tokens != 100000-18 {
 		t.Fatalf("incorrect capability snapshot: %s %v", content, err)
 	}

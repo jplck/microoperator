@@ -56,6 +56,16 @@ func checkTaskAdmission(ctx context.Context, tx *sql.Tx, cfg Configuration, e Ex
 	if t.Control == "stopped" || a.State == "stopped" || goalControl == "stopped" || TaskTerminal(t.State) {
 		return "task or agent stopped", nil
 	}
+	record, err := readSystem(ctx, tx, localAdministrator, e.SystemID)
+	if err != nil {
+		return "", err
+	}
+	if e.Model != a.Definition.Model {
+		return "model does not match pinned agent revision", nil
+	}
+	if err := cfg.authorizeModel(record.Configuration, e.Model); err != nil {
+		return err.Error(), nil
+	}
 	if t.LearningID != "" {
 		evaluation, err := readEvaluation(ctx, tx, t.SystemID, t.LearningID)
 		if err == nil {
@@ -127,6 +137,9 @@ func prepareNextCall(ctx context.Context, tx *sql.Tx, cfg Configuration, t TaskR
 	if a.State == "stopped" || t.Control == "stopped" {
 		return ErrExecutionConflict
 	}
+	if err := cfg.authorizeModel(record.Configuration, a.Definition.Model); err != nil {
+		return err
+	}
 	if err := authorizePins(ctx, tx, cfg, t.SystemID, t.Tools); err != nil {
 		return err
 	}
@@ -134,7 +147,11 @@ func prepareNextCall(ctx context.Context, tx *sql.Tx, cfg Configuration, t TaskR
 	if err := tx.QueryRowContext(ctx, `SELECT turns FROM agent_usage WHERE system_id=? AND agent_id=? AND goal_id=?`, t.SystemID, t.AgentID, t.GoalID).Scan(&turns); err != nil {
 		return err
 	}
-	if turns >= a.MaxTurns || t.Turns >= MaxTaskTurns {
+	continuous, err := goalIsContinuous(ctx, tx, t)
+	if err != nil {
+		return err
+	}
+	if (!continuous && turns >= a.MaxTurns) || t.Turns >= MaxTaskTurns {
 		return Invalid("turns", "agent/task turn limit exhausted")
 	}
 	record.Configuration.Operator = a.Definition
@@ -143,13 +160,19 @@ func prepareNextCall(ctx context.Context, tx *sql.Tx, cfg Configuration, t TaskR
 	if err != nil {
 		return err
 	}
-	var budget, used, reserved, deadline int64
-	if err := tx.QueryRowContext(ctx, `SELECT token_budget,used_tokens,reserved_tokens,deadline FROM goals WHERE system_id=? AND goal_id=?`, t.SystemID, t.GoalID).
-		Scan(&budget, &used, &reserved, &deadline); err != nil {
+	var budget, used, reserved, deadline, lifetime int64
+	if err := tx.QueryRowContext(ctx, `SELECT token_budget,used_tokens,reserved_tokens,deadline,task_lifetime_seconds FROM goals WHERE system_id=? AND goal_id=?`, t.SystemID, t.GoalID).
+		Scan(&budget, &used, &reserved, &deadline, &lifetime); err != nil {
 		return err
 	}
+	if continuous {
+		deadline = t.Deadline
+		if deadline == 0 {
+			deadline = cfg.taskDeadline(a.Definition.Model, lifetime, now)
+		}
+	}
 	if now.UnixMilli() >= deadline {
-		return Invalid("goal", "goal lifetime exhausted")
+		return Invalid("deadline", "task or goal lifetime exhausted")
 	}
 	if reservation > budget-used-reserved || reservation > record.RemainingTokens {
 		return Invalid("budget", "goal or system budget exhausted")
@@ -190,8 +213,8 @@ func prepareNextCall(ctx context.Context, tx *sql.Tx, cfg Configuration, t TaskR
 	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET call_id=?,turns=turns+1,state='queued',conversation=?,waiting_tool='',reason=''
-	 WHERE system_id=? AND task_id=?`, callID, conversation, t.SystemID, t.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET call_id=?,turns=turns+1,state='queued',conversation=?,waiting_tool='',reason='',deadline=?
+	 WHERE system_id=? AND task_id=?`, callID, conversation, deadline, t.SystemID, t.ID); err != nil {
 		return err
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE agent_usage SET turns=turns+1 WHERE system_id=? AND agent_id=? AND goal_id=?`, t.SystemID, a.ID, t.GoalID)
@@ -201,6 +224,7 @@ func prepareNextCall(ctx context.Context, tx *sql.Tx, cfg Configuration, t TaskR
 type ProposeAgentArgs struct {
 	Name        string   `json:"name"`
 	Prompt      string   `json:"prompt"`
+	Model       string   `json:"model,omitempty"`
 	Tools       []string `json:"tools"`
 	TokenBudget int64    `json:"token_budget"`
 }
@@ -212,6 +236,8 @@ type DelegateArgs struct {
 
 func (engine *workflow) builtin(ctx context.Context, tx *sql.Tx, e ExecutionRecord, t TaskRecord, name, arguments string) (string, error) {
 	switch name {
+	case "runtime.model.list", "runtime.agent.revise", "runtime.agent.retire":
+		return engine.manageAgent(ctx, tx, t, name, arguments)
 	case "runtime.capabilities", "runtime.artifact.put", "runtime.artifact.get":
 		return engine.bootstrapTool(ctx, tx, t, name, arguments)
 	case "runtime.learning.evaluate":
@@ -288,7 +314,7 @@ func (engine *workflow) builtin(ctx context.Context, tx *sql.Tx, e ExecutionReco
 					names = append(names, pin.Name)
 				}
 			}
-			result = append(result, map[string]any{"agent_id": a.ID, "name": a.Name, "state": a.State, "available": a.Available, "model": a.Definition.Model, "sandbox_profile": a.Definition.SandboxProfile, "tools": names, "tool_count": len(a.Tools)})
+			result = append(result, map[string]any{"agent_id": a.ID, "name": a.Name, "revision": a.Revision, "state": a.State, "available": a.Available, "model": a.Definition.Model, "sandbox_profile": a.Definition.SandboxProfile, "tools": names, "tool_count": len(a.Tools)})
 		}
 		return ToolOutcome(map[string]any{"agents": result, "next": next})
 	case "runtime.agent.propose":
@@ -320,19 +346,15 @@ func (engine *workflow) builtin(ctx context.Context, tx *sql.Tx, e ExecutionReco
 		if int64(count) >= record.Configuration.Limits.MaxAgents {
 			return "", Invalid("agent", "system agent capacity exhausted")
 		}
-		pins := make([]ToolPin, 0, len(args.Tools))
-		for _, name := range args.Tools {
-			found := false
-			for _, pin := range t.Tools {
-				if pin.Name == name {
-					pins = append(pins, pin)
-					found = true
-					break
-				}
-			}
-			if !found {
-				return "", Invalid("tools", "child cannot expand its creator's task grant")
-			}
+		if args.Model == "" {
+			args.Model = parent.Definition.Model
+		}
+		if err := engine.cfg.authorizeModel(record.Configuration, args.Model); err != nil {
+			return "", err
+		}
+		pins, err := narrowToolPins(t.Tools, args.Tools)
+		if err != nil {
+			return "", err
 		}
 		if err := authorizePins(ctx, tx, engine.cfg, t.SystemID, pins); err != nil {
 			return "", err
@@ -342,7 +364,7 @@ func (engine *workflow) builtin(ctx context.Context, tx *sql.Tx, e ExecutionReco
 			return "", err
 		}
 		def := parent.Definition
-		def.Prompt, def.Tools = args.Prompt, args.Tools
+		def.Prompt, def.Model, def.Tools = args.Prompt, args.Model, args.Tools
 		child := AgentRecord{SystemID: t.SystemID, ID: id, Parent: t.AgentID, GoalID: t.GoalID, Name: args.Name, Revision: 1, State: "active", Depth: parent.Depth + 1, TokenBudget: args.TokenBudget, MaxTurns: parent.MaxTurns, Definition: def, Tools: pins}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO agents(system_id,agent_id,parent_id,goal_id,name,revision,state,depth,token_budget,max_turns)
 		 VALUES(?,?,?,?,?,1,'active',?,?,?)`, t.SystemID, id, t.AgentID, t.GoalID, args.Name, child.Depth, args.TokenBudget, child.MaxTurns); err != nil {
@@ -377,7 +399,9 @@ func (engine *workflow) builtin(ctx context.Context, tx *sql.Tx, e ExecutionReco
 		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM tasks WHERE system_id=? AND agent_id=? AND state IN ('queued','running','waiting')`, t.SystemID, args.AgentID).Scan(&occupied); err != nil {
 			return "", err
 		}
-		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM tasks WHERE system_id=? AND goal_id=?`, t.SystemID, t.GoalID).Scan(&count); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM tasks WHERE system_id=? AND goal_id=? AND
+		 ((SELECT continuous FROM goals WHERE system_id=? AND goal_id=?)=0 OR state IN ('queued','running','waiting'))`,
+			t.SystemID, t.GoalID, t.SystemID, t.GoalID).Scan(&count); err != nil {
 			return "", err
 		}
 		if occupied != 0 || count >= MaxGoalTasks {
@@ -387,8 +411,8 @@ func (engine *workflow) builtin(ctx context.Context, tx *sql.Tx, e ExecutionReco
 		if err != nil {
 			return "", err
 		}
-		if caller.Definition.Model != recipient.Definition.Model || caller.Definition.SandboxProfile != recipient.Definition.SandboxProfile {
-			return "", Invalid("delegate", "recipient cannot lend a different model or host profile")
+		if caller.Definition.SandboxProfile != recipient.Definition.SandboxProfile {
+			return "", Invalid("delegate", "recipient cannot lend a different host profile")
 		}
 		pins := []ToolPin{}
 		for _, candidate := range recipient.Tools {
@@ -413,8 +437,8 @@ func (engine *workflow) builtin(ctx context.Context, tx *sql.Tx, e ExecutionReco
 		if err != nil {
 			return "", err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO tasks(system_id,task_id,goal_id,agent_id,agent_revision,parent_task,state,tools,conversation,turns,call_id)
-		 VALUES(?,?,?,?,?,?,'queued',?,?,0,'')`, t.SystemID, id, t.GoalID, args.AgentID, recipient.Revision, t.ID, tools, conversation); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO tasks(system_id,task_id,goal_id,agent_id,agent_revision,parent_task,state,tools,conversation,turns,call_id,deadline)
+		 VALUES(?,?,?,?,?,?,'queued',?,?,0,'',?)`, t.SystemID, id, t.GoalID, args.AgentID, recipient.Revision, t.ID, tools, conversation, t.Deadline); err != nil {
 			return "", err
 		}
 		child, err := readTask(ctx, tx, t.SystemID, id)
@@ -483,11 +507,17 @@ func terminateTask(ctx context.Context, tx *sql.Tx, t TaskRecord, state, respons
 	if TaskTerminal(t.State) {
 		return nil
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE schedules SET state='canceled',reason='owning task is terminal' WHERE system_id=? AND task_id=? AND state='active'`, t.SystemID, t.ID); err != nil {
+	continuous, err := goalIsContinuous(ctx, tx, t)
+	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE subscriptions SET state='canceled',reason='owning task is terminal' WHERE system_id=? AND task_id=? AND state='active'`, t.SystemID, t.ID); err != nil {
-		return err
+	if !continuous || state != "completed" || t.LearningID != "" {
+		if _, err := tx.ExecContext(ctx, `UPDATE schedules SET state='canceled',reason='owning task is terminal' WHERE system_id=? AND task_id=? AND state='active'`, t.SystemID, t.ID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE subscriptions SET state='canceled',reason='owning task is terminal' WHERE system_id=? AND task_id=? AND state='active'`, t.SystemID, t.ID); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET state=?,response=?,reason=? WHERE system_id=? AND task_id=?`, state, response, reason, t.SystemID, t.ID); err != nil {
 		return err
@@ -496,8 +526,23 @@ func terminateTask(ctx context.Context, tx *sql.Tx, t TaskRecord, state, respons
 		state, reason, t.SystemID, t.ID); err != nil {
 		return err
 	}
+	if continuous && state == "completed" && t.LearningID == "" {
+		completed := t
+		completed.State, completed.Response, completed.Reason = state, response, reason
+		if err := continuePendingInput(ctx, tx, completed); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE mailboxes SET state='dead',reason=? WHERE system_id=? AND task_id=? AND state='pending'`, "task is terminal: "+state, t.SystemID, t.ID); err != nil {
 		return err
+	}
+	if continuous {
+		if _, err := tx.ExecContext(ctx, `UPDATE goals SET state=CASE WHEN EXISTS
+		 (SELECT 1 FROM tasks WHERE system_id=? AND goal_id=? AND state IN ('queued','running','waiting'))
+		 THEN 'running' ELSE 'waiting' END WHERE system_id=? AND goal_id=? AND control!='stopped'`,
+			t.SystemID, t.GoalID, t.SystemID, t.GoalID); err != nil {
+			return err
+		}
 	}
 	if t.LearningID != "" {
 		return nil
@@ -519,6 +564,9 @@ func terminateTask(ctx context.Context, tx *sql.Tx, t TaskRecord, state, respons
 			}
 		}
 	} else {
+		if continuous && state != "canceled" {
+			return nil
+		}
 		if _, err := tx.ExecContext(ctx, `UPDATE goals SET state=? WHERE system_id=? AND goal_id=?`, state, t.SystemID, t.GoalID); err != nil {
 			return err
 		}

@@ -49,7 +49,7 @@ func TestGoalFirstBootstrapDelegatesProposesAndRecoversBlockedWork(t *testing.T)
 			completion(w, "Propose a pure Process function; a design is not an executed simulation.")
 			return
 		}
-		if len(request.Tools) != 12 || !strings.Contains(request.Messages[0].Content, "not a predefined domain workflow") {
+		if len(request.Tools) != 15 || !strings.Contains(request.Messages[0].Content, "not a predefined domain workflow") {
 			t.Error("system did not receive the general-purpose bootstrap")
 		}
 		switch lastFunction {

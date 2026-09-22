@@ -160,6 +160,7 @@ type TaskRecord struct {
 	Tools        []ToolPin     `json:"tools"`
 	Conversation []ChatMessage `json:"-"`
 	Turns        int           `json:"turns"`
+	Deadline     int64         `json:"deadline_ms"`
 	CallID       string        `json:"call_id"`
 	WaitingTool  string        `json:"waiting_tool,omitempty"`
 	Response     string        `json:"response,omitempty"`
@@ -186,8 +187,8 @@ type AgentRecord struct {
 
 func readTask(ctx context.Context, tx *sql.Tx, systemID, id string) (t TaskRecord, err error) {
 	var tools, conversation []byte
-	err = tx.QueryRowContext(ctx, `SELECT system_id,task_id,goal_id,agent_id,agent_revision,parent_task,state,control,tools,conversation,turns,call_id,waiting_tool,response,reason,learning_id,learning_role
-	 FROM tasks WHERE system_id=? AND task_id=?`, systemID, id).Scan(&t.SystemID, &t.ID, &t.GoalID, &t.AgentID, &t.Revision, &t.Parent, &t.State, &t.Control, &tools, &conversation, &t.Turns, &t.CallID, &t.WaitingTool, &t.Response, &t.Reason, &t.LearningID, &t.LearningRole)
+	err = tx.QueryRowContext(ctx, `SELECT system_id,task_id,goal_id,agent_id,agent_revision,parent_task,state,control,tools,conversation,turns,call_id,waiting_tool,response,reason,learning_id,learning_role,deadline
+	 FROM tasks WHERE system_id=? AND task_id=?`, systemID, id).Scan(&t.SystemID, &t.ID, &t.GoalID, &t.AgentID, &t.Revision, &t.Parent, &t.State, &t.Control, &tools, &conversation, &t.Turns, &t.CallID, &t.WaitingTool, &t.Response, &t.Reason, &t.LearningID, &t.LearningRole, &t.Deadline)
 	if err != nil {
 		return t, err
 	}
@@ -239,6 +240,11 @@ func emitEvent(ctx context.Context, tx *sql.Tx, t TaskRecord, kind, source, caus
 	if len(data) > MaxEventBytes {
 		return "", Invalid("event", "payload exceeds 8 KiB")
 	}
+	var continuous bool
+	var deadline int64
+	if err := tx.QueryRowContext(ctx, `SELECT continuous,deadline FROM goals WHERE system_id=? AND goal_id=?`, t.SystemID, t.GoalID).Scan(&continuous, &deadline); err != nil {
+		return "", err
+	}
 	depth := 0
 	if causation != "" {
 		if err := tx.QueryRowContext(ctx, `SELECT depth+1 FROM events WHERE system_id=? AND event_id=?`, t.SystemID, causation).Scan(&depth); err != nil {
@@ -246,7 +252,8 @@ func emitEvent(ctx context.Context, tx *sql.Tx, t TaskRecord, kind, source, caus
 		}
 	}
 	var total, goalCount, pending int
-	if err := tx.QueryRowContext(ctx, `SELECT count(*),COALESCE(SUM(CASE WHEN goal_id=? THEN 1 ELSE 0 END),0) FROM events WHERE system_id=?`, t.GoalID, t.SystemID).Scan(&total, &goalCount); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT count(*),COALESCE(SUM(CASE WHEN goal_id=? AND (?=0 OR task_id=?) THEN 1 ELSE 0 END),0)
+	 FROM events WHERE system_id=? AND (?=0 OR created_at>?)`, t.GoalID, continuous, t.ID, t.SystemID, continuous, now.Add(-24*time.Hour).UnixMilli()).Scan(&total, &goalCount); err != nil {
 		return "", err
 	}
 	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM mailboxes WHERE system_id=? AND recipient=? AND state IN ('pending','leased')`, t.SystemID, t.AgentID).Scan(&pending); err != nil {
@@ -269,11 +276,7 @@ func emitEvent(ctx context.Context, tx *sql.Tx, t TaskRecord, kind, source, caus
 	if err != nil {
 		return "", err
 	}
-	var deadline int64
-	if err := tx.QueryRowContext(ctx, `SELECT deadline FROM goals WHERE system_id=? AND goal_id=?`, t.SystemID, t.GoalID).Scan(&deadline); err != nil {
-		return "", err
-	}
-	if deadline <= now.UnixMilli() && kind != "task.result" {
+	if !continuous && deadline <= now.UnixMilli() && kind != "task.result" {
 		return "", Invalid("event", "goal lifetime has expired")
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO events(event_id,system_id,type,source,recipient,goal_id,task_id,correlation_id,causation_id,created_at,expires_at,authorization_ref,depth,payload)
@@ -307,11 +310,11 @@ func initializeRootTask(ctx context.Context, tx *sql.Tx, record SystemRecord, e 
 	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO tasks(system_id,task_id,goal_id,agent_id,agent_revision,state,tools,conversation,call_id)
-	 VALUES(?,?,?,?,?,'queued',?,?,?)`, record.ID, e.TaskID, e.GoalID, a.ID, a.Revision, pins, conversation, e.CallID); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO tasks(system_id,task_id,goal_id,agent_id,agent_revision,state,tools,conversation,call_id,deadline)
+	 VALUES(?,?,?,?,?,'queued',?,?,?,?)`, record.ID, e.TaskID, e.GoalID, a.ID, a.Revision, pins, conversation, e.CallID, e.Deadline); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE goals SET deadline=? WHERE system_id=? AND goal_id=?`, e.Deadline, record.ID, e.GoalID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE goals SET deadline=CASE WHEN continuous=1 THEN 0 ELSE ? END WHERE system_id=? AND goal_id=?`, e.Deadline, record.ID, e.GoalID); err != nil {
 		return err
 	}
 	t, err := readTask(ctx, tx, record.ID, e.TaskID)

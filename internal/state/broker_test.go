@@ -124,7 +124,7 @@ func TestStoreMigrationFromPopulatedVersionOne(t *testing.T) {
 	if err := migrated.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if keys != 1 || version != 5 {
+	if keys != 1 || version != 6 {
 		t.Fatalf("migration enforcement/version = %d/%d", keys, version)
 	}
 	if _, err := migrated.db.Exec(`DELETE FROM audit`); err == nil {

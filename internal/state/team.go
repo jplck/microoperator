@@ -37,7 +37,7 @@ func (engine *workflow) claim(ctx context.Context, now time.Time) (record System
 	 WHERE m.state='pending' AND m.not_before<=?
 	 AND NOT EXISTS(SELECT 1 FROM mailboxes live WHERE live.system_id=m.system_id AND live.recipient=m.recipient AND live.state='leased')
 	 AND (t.state IN ('completed','failed','canceled','rejected') OR t.control='stopped' OR a.state='stopped' OR g.control='stopped'
-	  OR s.state IN ('stopping','stopped') OR v.expires_at<=? OR m.attempts>=3
+	  OR s.state IN ('stopping','stopped') OR (v.expires_at>0 AND v.expires_at<=?) OR m.attempts>=3
 	  OR (s.state='running' AND a.state='active' AND t.control='active' AND g.control='active'
 	   AND (t.state!='waiting' OR t.waiting_tool='' OR v.type IN ('task.result','task.progress'))))
 	 ORDER BY s.last_admission,m.sequence LIMIT 512`, now.UnixMilli(), now.UnixMilli())
@@ -75,7 +75,7 @@ func (engine *workflow) claim(ctx context.Context, now time.Time) (record System
 		if err := tx.QueryRowContext(ctx, `SELECT control FROM goals WHERE system_id=? AND goal_id=?`, t.SystemID, t.GoalID).Scan(&goalControl); err != nil {
 			return record, e, false, err
 		}
-		if TaskTerminal(t.State) || t.Control == "stopped" || a.State == "stopped" || goalControl == "stopped" || record.State == "stopping" || record.State == "stopped" || c.expires <= now.UnixMilli() || c.attempts >= 3 {
+		if TaskTerminal(t.State) || t.Control == "stopped" || a.State == "stopped" || goalControl == "stopped" || record.State == "stopping" || record.State == "stopped" || (c.expires > 0 && c.expires <= now.UnixMilli()) || c.attempts >= 3 {
 			reason := "delivery expired, stopped, terminal, or retry limit exhausted"
 			if _, err := tx.ExecContext(ctx, `UPDATE mailboxes SET state='dead',reason=? WHERE system_id=? AND event_id=?`, reason, t.SystemID, c.eventID); err != nil {
 				return record, e, false, err
@@ -125,6 +125,21 @@ func (engine *workflow) claim(ctx context.Context, now time.Time) (record System
 				return record, e, false, err
 			}
 			continue
+		}
+		if t.CallID == "" {
+			if err := prepareNextCall(ctx, tx, engine.cfg, t, engine.owner, now); err != nil {
+				if !DeniedTask(err) {
+					return record, e, false, err
+				}
+				if err := terminateTask(ctx, tx, t, "rejected", "", err.Error(), "runtime", c.eventID, now); err != nil {
+					return record, e, false, err
+				}
+				continue
+			}
+			t, err = readTask(ctx, tx, t.SystemID, t.ID)
+			if err != nil {
+				return record, e, false, err
+			}
 		}
 		if t.State == "waiting" && t.WaitingTool != "" && c.kind != "task.result" {
 			continue
@@ -376,7 +391,7 @@ func (engine *workflow) finishDelivery(ctx context.Context, session ExecutionRec
 			return tx.Commit()
 		}
 	}
-	stopped := canceled || systemState == "stopping" || systemState == "stopped" || goalControl == "stopped" || t.Control == "stopped"
+	stopped := (canceled && !e.Continuous) || systemState == "stopping" || systemState == "stopped" || goalControl == "stopped" || t.Control == "stopped"
 	var attempts int
 	if session.EventID != "" {
 		if err := tx.QueryRowContext(ctx, `SELECT attempts FROM mailboxes WHERE system_id=? AND event_id=? AND lease_owner=?`, t.SystemID, session.EventID, engine.owner).Scan(&attempts); err != nil {
@@ -427,6 +442,18 @@ func (engine *workflow) finishDelivery(ctx context.Context, session ExecutionRec
 				return errors.New("tool completion lacks durable receipt")
 			}
 			if t.State == "waiting" {
+				if e.Continuous && e.Actions[0].Function.Name == WireToolName("runtime.task.wait") {
+					if err := terminateTask(ctx, tx, t, "completed", t.Reason, t.Reason, t.AgentID, session.EventID, now); err != nil {
+						return err
+					}
+					if err := engine.notifySubscriptions(ctx, tx, t, "task.completed", "", "", session.EventID, t.ID, now); err != nil {
+						return err
+					}
+					if err := auditExecution(ctx, tx, t.SystemID, t.AgentID, "task.completed", e.Revision, now); err != nil {
+						return err
+					}
+					return tx.Commit()
+				}
 				if err := auditExecution(ctx, tx, t.SystemID, t.AgentID, "task.waiting", e.Revision, now); err != nil {
 					return err
 				}
@@ -439,7 +466,7 @@ func (engine *workflow) finishDelivery(ctx context.Context, session ExecutionRec
 			 WHERE m.system_id=? AND m.task_id=? AND m.state='pending' AND v.type IN ('user.input','schedule.fired','memory.changed','task.notice')`, t.SystemID, t.ID).Scan(&pending); err != nil {
 				return err
 			}
-			if pending == 0 {
+			if pending == 0 && !e.Continuous {
 				var triggers int
 				if err := tx.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM schedules WHERE system_id=? AND task_id=? AND state='active')+
 				 (SELECT count(*) FROM subscriptions WHERE system_id=? AND task_id=? AND state='active')`, t.SystemID, t.ID, t.SystemID, t.ID).Scan(&triggers); err != nil {
@@ -458,6 +485,8 @@ func (engine *workflow) finishDelivery(ctx context.Context, session ExecutionRec
 					}
 					return tx.Commit()
 				}
+				state = "completed"
+			} else if e.Continuous {
 				state = "completed"
 			} else {
 				t.Conversation = append(t.Conversation, ChatMessage{Role: "assistant", Content: e.Response})
@@ -569,7 +598,11 @@ func (store *Store) RecoverExecutions(ctx context.Context) (err error) {
 		if err := terminateTask(ctx, tx, t, "failed", "", "daemon restarted with an unrecoverable outcome", "runtime", "", time.Now()); err != nil {
 			return err
 		}
-		if t.Parent == "" {
+		continuous, err := goalIsContinuous(ctx, tx, t)
+		if err != nil {
+			return err
+		}
+		if t.Parent == "" && !continuous {
 			if _, err := tx.ExecContext(ctx, `UPDATE systems SET state='stopped' WHERE system_id=?`, t.SystemID); err != nil {
 				return err
 			}
@@ -580,7 +613,8 @@ func (store *Store) RecoverExecutions(ctx context.Context) (err error) {
 	 UPDATE model_calls SET state='failed',reason='legacy activation has no resumable mailbox'
 	  WHERE state IN ('awaiting_worker','queued') AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.system_id=model_calls.system_id AND t.task_id=model_calls.task_id);
 	 UPDATE goals SET state='failed' WHERE state IN ('running','waiting','queued') AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.system_id=goals.system_id AND t.goal_id=goals.goal_id);
-	 UPDATE systems SET state='stopped' WHERE state IN ('running','stopping') AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.system_id=systems.system_id AND t.state IN ('queued','running','waiting'));`); err != nil {
+	 UPDATE systems SET state='stopped' WHERE state IN ('running','stopping') AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.system_id=systems.system_id AND t.state IN ('queued','running','waiting'))
+	  AND NOT EXISTS(SELECT 1 FROM goals g WHERE g.system_id=systems.system_id AND g.continuous=1 AND g.control!='stopped' AND g.state IN ('queued','running','waiting'));`); err != nil {
 		return err
 	}
 	return tx.Commit()

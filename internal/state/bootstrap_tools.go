@@ -66,13 +66,15 @@ func (engine *workflow) bootstrapTool(ctx context.Context, tx *sql.Tx, task Task
 			RemainingTokens       int64        `json:"remaining_tokens"`
 			RemainingTaskTurns    int          `json:"remaining_task_turns"`
 			Deadline              int64        `json:"goal_deadline_ms"`
+			TaskDeadline          int64        `json:"task_deadline_ms"`
+			Continuous            bool         `json:"continuous"`
 			ProtectedChecks       []string     `json:"protected_check_ids"`
 			GeneratedBuildReady   bool         `json:"generated_build_configured"`
 			GeneratedBuildBlocker string       `json:"generated_build_blocker,omitempty"`
 			HumanApproval         bool         `json:"exact_artifact_approval_required"`
 			GeneratedContract     string       `json:"generated_tool_contract"`
 		}{task.Tools, agent.Definition.Model, agent.Definition.SandboxProfile, system.Configuration.Limits,
-			remaining, max(0, MaxTaskTurns-task.Turns), deadline, checks, buildReason == "", buildReason, true,
+			remaining, max(0, MaxTaskTurns-task.Turns), deadline, task.Deadline, system.Continuous, checks, buildReason == "", buildReason, true,
 			"package main; Process(string) (string, error); stdlib only; source <=8192 bytes; input <=4096 bytes; output <=8192 bytes; 10 seconds; no network/broker access; explicit state input/output"})
 	case "runtime.artifact.put":
 		var args struct {

@@ -3,6 +3,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -44,22 +45,7 @@ func (api *controlAPI) control(w http.ResponseWriter, r *http.Request) {
 				api.failure(w, decodeErr)
 				return
 			}
-			for _, active := range engine.active {
-				if active.systemID == record.ID && strings.HasPrefix(active.callID, "evaluation_") {
-					task, taskErr := engine.taskSnapshot(r.Context(), record.ID, active.taskID)
-					if taskErr != nil {
-						api.logger.Printf("evaluation control lookup: %v", taskErr)
-						active.cancel()
-					} else if state.TaskTerminal(task.State) || task.Control == "stopped" {
-						active.cancel()
-					}
-				}
-				for _, call := range result.Calls {
-					if active.callID == call {
-						active.cancel()
-					}
-				}
-			}
+			engine.cancelControlledCalls(r.Context(), record.ID, result.Calls)
 		} else if !errors.Is(err, state.ErrSystemNotFound) && !errors.Is(err, state.ErrCommandConflict) {
 			for _, active := range engine.active {
 				if active.systemID == r.PathValue("system_id") && (scope == "system" || (scope == "goal" && active.goalID == id) || (scope == "agent" && active.agentID == id)) {
@@ -70,4 +56,28 @@ func (api *controlAPI) control(w http.ResponseWriter, r *http.Request) {
 	}
 	engine.notify()
 	api.systemResponse(w, 202, record, err)
+}
+
+// The caller holds engine.mu; durable stop state is committed before cancellation.
+func (engine *executionEngine) cancelControlledCalls(ctx context.Context, systemID string, calls []string) {
+	for _, active := range engine.active {
+		if active.systemID != systemID {
+			continue
+		}
+		if strings.HasPrefix(active.callID, "evaluation_") {
+			task, err := engine.taskSnapshot(ctx, systemID, active.taskID)
+			if err != nil {
+				engine.logger.Printf("evaluation control lookup: %v", err)
+				active.cancel()
+			} else if state.TaskTerminal(task.State) || task.Control == "stopped" {
+				active.cancel()
+			}
+		}
+		for _, call := range calls {
+			if active.callID == call {
+				active.cancel()
+				break
+			}
+		}
+	}
 }

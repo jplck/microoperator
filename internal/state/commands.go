@@ -174,7 +174,11 @@ func (store *Store) AddInput(ctx context.Context, key string, systemID string, c
 		return SystemRecord{}, Invalid("content", "requires 1-4096 bytes")
 	}
 	return store.mutation(ctx, key, systemID, "user.input", command, func(tx *sql.Tx, s SystemRecord) (any, error) {
-		t, err := activeInputTask(ctx, tx, s, command.AgentID)
+		t, err := inputTask(ctx, tx, s, command.AgentID)
+		if err != nil {
+			return nil, err
+		}
+		t, err = wakeContinuousTask(ctx, tx, t)
 		if err != nil {
 			return nil, err
 		}
@@ -253,7 +257,7 @@ func (store *Store) Control(ctx context.Context, cfg Configuration, key string, 
 			}
 		}
 		if action == "stop" {
-			calls, err := stopTasks(ctx, tx, s.ID, scope, id)
+			calls, err := stopTasks(ctx, tx, s.ID, scope, id, localAdministrator, "stopped by administrator")
 			if err != nil {
 				return nil, err
 			}
@@ -278,7 +282,11 @@ func (store *Store) AddAttachment(ctx context.Context, key string, systemID stri
 		return SystemRecord{}, Invalid("attachment", "encoded text attachment exceeds 4096 bytes")
 	}
 	return store.mutation(ctx, key, systemID, "attachment.add", command, func(tx *sql.Tx, s SystemRecord) (any, error) {
-		t, err := activeInputTask(ctx, tx, s, command.AgentID)
+		t, err := inputTask(ctx, tx, s, command.AgentID)
+		if err != nil {
+			return nil, err
+		}
+		t, err = wakeContinuousTask(ctx, tx, t)
 		if err != nil {
 			return nil, err
 		}
@@ -370,7 +378,7 @@ func (store *Store) ChangeMemoryState(ctx context.Context, cfg Configuration, ow
 	})
 }
 
-func activeInputTask(ctx context.Context, tx *sql.Tx, s SystemRecord, agentID string) (TaskRecord, error) {
+func inputTask(ctx context.Context, tx *sql.Tx, s SystemRecord, agentID string) (TaskRecord, error) {
 	if s.State != "running" && s.State != "paused" {
 		return TaskRecord{}, ErrExecutionConflict
 	}
@@ -381,7 +389,22 @@ func activeInputTask(ctx context.Context, tx *sql.Tx, s SystemRecord, agentID st
 	err := tx.QueryRowContext(ctx, `SELECT t.task_id FROM tasks t JOIN agents a ON a.system_id=t.system_id AND a.agent_id=t.agent_id JOIN goals g ON g.system_id=t.system_id AND g.goal_id=t.goal_id
 	 WHERE t.system_id=? AND t.agent_id=? AND t.state IN ('queued','running','waiting') AND t.control!='stopped' AND a.state!='stopped' AND g.control!='stopped'`, s.ID, agentID).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
-		return TaskRecord{}, ErrSystemNotFound
+		if !s.Continuous || s.Execution == nil {
+			return TaskRecord{}, ErrSystemNotFound
+		}
+		if err := tx.QueryRowContext(ctx, `SELECT t.task_id FROM tasks t JOIN agents a ON a.system_id=t.system_id AND a.agent_id=t.agent_id
+		 WHERE t.system_id=? AND t.agent_id=? AND t.goal_id=? AND t.control!='stopped' AND a.state!='stopped' AND t.learning_id=''
+		 ORDER BY t.rowid DESC LIMIT 1`, s.ID, agentID, s.Execution.GoalID).Scan(&id); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return TaskRecord{}, ErrSystemNotFound
+			}
+			return TaskRecord{}, err
+		}
+		previous, err := readTask(ctx, tx, s.ID, id)
+		if err != nil {
+			return TaskRecord{}, err
+		}
+		return previous, nil
 	}
 	if err != nil {
 		return TaskRecord{}, err
@@ -395,9 +418,12 @@ func activeInputTask(ctx context.Context, tx *sql.Tx, s SystemRecord, agentID st
 
 func (store *Store) CreateSchedule(ctx context.Context, cfg Configuration, key string, systemID string, command ScheduleCommand) (SystemRecord, error) {
 	return store.mutation(ctx, key, systemID, "schedule.create", command, func(tx *sql.Tx, s SystemRecord) (any, error) {
-		t, err := activeInputTask(ctx, tx, s, command.AgentID)
+		t, err := inputTask(ctx, tx, s, command.AgentID)
 		if err != nil {
 			return nil, err
+		}
+		if TaskTerminal(t.State) && t.State != "completed" {
+			return nil, Invalid("schedule", "failed work requires new human input before scheduling")
 		}
 		if err := authorizePins(ctx, tx, cfg, s.ID, t.Tools); err != nil {
 			return nil, err
@@ -409,9 +435,12 @@ func (store *Store) CreateSchedule(ctx context.Context, cfg Configuration, key s
 
 func (store *Store) CreateSubscription(ctx context.Context, cfg Configuration, key string, systemID string, command SubscriptionCommand) (SystemRecord, error) {
 	return store.mutation(ctx, key, systemID, "subscription.create", command, func(tx *sql.Tx, s SystemRecord) (any, error) {
-		t, err := activeInputTask(ctx, tx, s, command.AgentID)
+		t, err := inputTask(ctx, tx, s, command.AgentID)
 		if err != nil {
 			return nil, err
+		}
+		if TaskTerminal(t.State) && t.State != "completed" {
+			return nil, Invalid("subscription", "failed work requires new human input before subscribing")
 		}
 		if err := authorizePins(ctx, tx, cfg, s.ID, t.Tools); err != nil {
 			return nil, err

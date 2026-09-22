@@ -191,6 +191,13 @@ func systemSummary(page *uiPage, record state.SystemRecord) {
 	if record.BlockedReason != "" {
 		page.Error = record.BlockedReason
 	}
+	if record.Continuous {
+		page.GoalLabel = "Continuous goal"
+		if record.Idle && record.State == "running" {
+			page.State = "waiting"
+			page.Notice = "Continuous assistant is idle; no model calls or workers are running. Send input or wait for an authorized event."
+		}
+	}
 }
 
 func (app *controlUI) activity(w http.ResponseWriter, r *http.Request) {

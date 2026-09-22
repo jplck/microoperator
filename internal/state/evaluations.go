@@ -47,7 +47,7 @@ func queueLearning(ctx context.Context, tx *sql.Tx, engine *workflow, s SystemRe
 	if err := tx.QueryRowContext(ctx, `SELECT deadline,token_budget,used_tokens,reserved_tokens,control FROM goals WHERE system_id=? AND goal_id=?`, s.ID, origin.GoalID).Scan(&deadline, &budget, &used, &reserved, &control); err != nil {
 		return nil, err
 	}
-	if control != "active" || deadline <= now.UnixMilli() || budget <= used+reserved {
+	if control != "active" || (deadline > 0 && deadline <= now.UnixMilli()) || origin.Deadline <= now.UnixMilli() || budget <= used+reserved {
 		return nil, Invalid("goal", "evaluation exceeds remaining goal lifetime or budget")
 	}
 	draft, err := readLearningDraft(ctx, tx, s.ID, command.ToolID, command.Version)
@@ -214,8 +214,8 @@ func queueLearning(ctx context.Context, tx *sql.Tx, engine *workflow, s SystemRe
 			if err != nil {
 				return nil, err
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO tasks(system_id,task_id,goal_id,agent_id,agent_revision,parent_task,state,tools,conversation,turns,call_id,learning_id,learning_role)
-			 VALUES(?,?,?,?,?,?,'queued','[]',?,0,'',?,?)`, s.ID, taskID, origin.GoalID, agent.ID, revision, origin.ID, conversation, id, role+string(rune('0'+index))); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO tasks(system_id,task_id,goal_id,agent_id,agent_revision,parent_task,state,tools,conversation,turns,call_id,learning_id,learning_role,deadline)
+			 VALUES(?,?,?,?,?,?,'queued','[]',?,0,'',?,?,?)`, s.ID, taskID, origin.GoalID, agent.ID, revision, origin.ID, conversation, id, role+string(rune('0'+index)), origin.Deadline); err != nil {
 				return nil, err
 			}
 			task, err := readTask(ctx, tx, s.ID, taskID)

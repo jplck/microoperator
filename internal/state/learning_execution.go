@@ -72,7 +72,7 @@ func learningEligible(ctx context.Context, tx *sql.Tx, cfg Configuration, system
 	if err := tx.QueryRowContext(ctx, `SELECT s.state,g.control,g.deadline FROM systems s JOIN goals g USING(system_id) WHERE s.system_id=? AND g.goal_id=?`, systemID, t.GoalID).Scan(&state, &control, &deadline); err != nil {
 		return err
 	}
-	if (state != "running" && state != "paused") || control == "stopped" || now.UnixMilli() >= deadline {
+	if (state != "running" && state != "paused") || control == "stopped" || (deadline > 0 && now.UnixMilli() >= deadline) || now.UnixMilli() >= t.Deadline {
 		return Invalid("evaluation", "owning goal stopped or expired")
 	}
 	if err := authorizePins(ctx, tx, cfg, systemID, t.Tools); err != nil {
@@ -102,6 +102,9 @@ func (engine *workflow) claimLearning(ctx context.Context, tx *sql.Tx, record Sy
 	var deadline int64
 	if err := tx.QueryRowContext(ctx, `SELECT deadline FROM goals WHERE system_id=? AND goal_id=?`, t.SystemID, t.GoalID).Scan(&deadline); err != nil {
 		return ExecutionRecord{}, err
+	}
+	if deadline == 0 {
+		deadline = t.Deadline
 	}
 	deadline = min(deadline, now.Add(120*time.Second).UnixMilli())
 	if _, err := tx.ExecContext(ctx, `UPDATE learning_evaluations SET state='evaluating' WHERE system_id=? AND evaluation_id=?`, t.SystemID, e.ID); err != nil {

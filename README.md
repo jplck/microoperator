@@ -5,6 +5,8 @@ authenticated local control API, and a shared model broker. Reviewed, nono-go-co
 run bounded tool-using turns and delegate to agents through durable mailboxes.
 Scoped tools/skills, durable teams, memory, schedules, a detached browser UI, and
 protected learning evaluations are implemented.
+Systems can run bounded goals or continuous assistants that retain their goal and
+team between bounded pieces of work.
 
 **Generated Go requires explicit approval and the resource-confined Linux/amd64
 profile.** The default reviewed-code profile cannot build or run generated tools.
@@ -210,7 +212,7 @@ Each provider accepts `timeout_seconds`: 1-3600 seconds, with omitted/zero meani
 60 seconds. This bounds credential acquisition and the entire request, including
 response headers, body, and streaming. The Ollama sample allows 600 seconds for
 large local models, including loading and inference; this is not a speed guarantee.
-The original goal deadline can end a request sooner. Changing this administrative
+The task or bounded-goal deadline can end a request sooner. Changing this administrative
 setting requires restarting the daemon and creating or explicitly revising a system
 to bind the new definitions. It does not replay or refund earlier timed-out calls.
 
@@ -306,6 +308,10 @@ discovers capabilities, plans, delegates narrowly, proposes missing tools and
 requires evidence before claiming success. Administrators can override bootstrap
 operator settings and limits or supply explicit tool lists; omitted lists use the
 generic capabilities, while `[]` grants no tools. Supplied limits must be complete.
+New systems snapshot all configured model aliases unless `bootstrap.models`
+supplies a narrower nonempty list containing the initial operator model. Existing
+systems without a `models` list retain only their original operator model until
+explicitly revised; adding a provider or alias never silently expands their grants.
 No domain prompt, simulator or trading strategy is required to create a system.
 It must request human input when a needed capability cannot yet be used.
 
@@ -391,7 +397,7 @@ Profile validation and native support diagnostics are not permission to run
 untrusted code. Model/tool calls use authenticated worker pipes, not a public
 arbitrary-prompt/provider or arbitrary-tool-invocation endpoint.
 
-### Run one operator goal
+### Run an operator goal
 
 Set `SYSTEM_ID` to an instance's returned `system_id`. Starting its still-pending
 initial goal requires the revision you inspected:
@@ -432,6 +438,45 @@ There is one active goal per system and one active activation per agent, at most
 64 across the daemon, subject to each system's `max_active_agents`. Task data crosses private pipes only after
 sandbox readiness. Scope comes from that activation, not worker-supplied identities.
 
+### Continuous assistant
+
+Start with `{"expected_revision":1,"continuous":true}` to keep the goal and team
+available until explicitly stopped. Omission or `false` preserves bounded-goal
+behavior. The UI's **Continuous assistant** checkbox is checked by default.
+Creation still requires an explicit start; this is not the chat-workspace redesign.
+
+A final answer or `runtime.task.wait` ends the current task, not the continuous
+goal. The system stays `running` (or `paused`) and reports `idle:true` when no tasks
+remain active. Idle consumes no model calls or worker processes. Send `/input`
+to resume with a fresh task in the same goal; authorized timers and subscriptions
+can do the same. Input arriving during completion is transferred durably to the
+next task. Paused input survives restart without being dispatched.
+
+There is no lifetime number-of-runs cap in this mode. Each task still has at most
+eight model turns and a deadline; delegation shares its originating task's deadline.
+`lifetime_seconds` now bounds each task, not the continuous goal. The initial
+explicit start prepares its first call immediately; later idle wakes start their
+deadline when claimed. Defaults use the selected model's provider timeout and quota
+wait, as for bounded goals. Pause never extends an already prepared task deadline.
+
+Agent identities/revisions, memory, history and cumulative system/goal/ancestor
+token usage survive every wake. Nothing renews token allowances automatically.
+New tasks carry the original goal and at most eight recent user/assistant messages
+(8192 bytes), not an ever-growing model context; older context remains in durable
+history and scoped memory/artifacts. Tool results are not blindly replayed.
+
+Continuous mode allows 64 active tasks/goal, 256 events/task and 4096 events/system
+in a rolling 24-hour window, rather than lifetime task/event counts. Per-agent
+event rates, mailbox/depth limits, finite trigger budgets, registry/artifact/memory
+storage limits and all model quotas still apply. Successful tasks retain standing
+triggers; failed/ambiguous work does not automatically retry. Explicit human input
+can start new work after a failure without replaying the uncertain action.
+Stopping cancels pending wakeups and the team; another start creates a new goal,
+not a resumed old timer or refreshed system allowance.
+
+SQLite schema 6 migrates existing goals as bounded and backfills their task
+deadlines. Configuration JSON remains schema 1.
+
 ### Scoped tools and agent teams
 
 The generic bootstrap already enables scoped delegation. Use a model that supports
@@ -440,8 +485,11 @@ and `bootstrap.operator.tools` (or explicitly revise a stopped system), for exam
 
 ```json
 [
+  "runtime.model.list",
   "runtime.agent.list",
   "runtime.agent.propose",
+  "runtime.agent.revise",
+  "runtime.agent.retire",
   "runtime.task.delegate",
   "runtime.task.progress",
   "runtime.tool.propose",
@@ -457,10 +505,13 @@ Plain model text is never treated as code or as a function request.
 
 | Tool | Behavior |
 | --- | --- |
-| `runtime.capabilities` | Current task's exact tool pins, model/profile, remaining ancestral budget/turns, goal deadline, protected check IDs (not cases), and generated-build blockers; grants nothing |
+| `runtime.capabilities` | Current task's exact tool pins, model/profile, remaining ancestral budget/turns, continuous mode, task/goal deadlines (zero means no goal deadline), protected check IDs (not cases), and generated-build blockers; grants nothing |
 | `runtime.artifact.put` / `runtime.artifact.get` | Immutable inert text/JSON, up to 3072 UTF-8 bytes and a bounded encoded result; reads restricted to the current system and goal; writes stop at 128 goal artifacts |
-| `runtime.agent.list` | Same-goal collaborators, availability, model/profile, and capability summaries; five per page with `after`/`next`. Shows up to 16 tool names plus the full `tool_count`; the administrator's agent view has full pins |
-| `runtime.agent.propose` | Creates a child with a name, prompt, subset of the current task's tools, and token cap; inherits model/profile; does not launch it |
+| `runtime.model.list` | System-allowed configured aliases, provider names, upstream model names and output caps; five per page with `after`/`next`; no endpoints or credentials |
+| `runtime.agent.list` | Same-goal collaborators, current revision, availability, model/profile, and capability summaries; five per page with `after`/`next`. Shows up to 16 tool names plus the full `tool_count`; the administrator's agent view has full pins |
+| `runtime.agent.propose` | Creates a child with a name, prompt, subset of the current task's tools, token cap and optional `model` alias; omitted model inherits the creator's; always inherits the sandbox profile; does not launch it |
+| `runtime.agent.revise` | Operator-only `{agent_id,expected_revision,prompt,model,tools}` creates an immutable child revision for future tasks; cannot rewrite the operator or protected evaluation agents |
+| `runtime.agent.retire` | Operator-only `{agent_id,expected_revision}` stops a same-goal child and its creation descendants, cancels their delegated work and retains history/usage |
 | `runtime.task.delegate` | Returns a task ID and persists a waiting continuation; the child runs through a mailbox, then its result wakes the parent |
 | `runtime.task.progress` | Records a bounded progress event for the parent; does not create another model turn by itself |
 | `runtime.tool.propose` | Stores a private, inert skill or Go-source draft with creator/goal/task provenance; never builds or activates it |
@@ -473,10 +524,31 @@ proposed action instead of interpreting arbitrary plans.
 
 Registry visibility is not a grant. Task pins include the version and definition
 digest; invocation and delayed delivery recheck availability and revocation.
-Delegation intersects caller task and recipient grants, disallows a different
-model/profile, and charges creation/delegation ancestors as well as the common
+Delegation intersects caller task and recipient tool grants, permits a different
+system-allowed model but not a different sandbox profile, and charges
+creation/delegation ancestors as well as the common
 goal and system. A waiting parent releases its execution slot, so a parent and child
 can run with `max_active_agents:1`.
+
+The operator can choose a model when creating a specialist, then revise its prompt,
+model and tools after inspecting `runtime.agent.list`. Revised tools must fit both
+the operator's task pins and the creation parent's current pins. Queued, running
+and waiting tasks keep their original revision; changing a role is not revocation.
+Use explicit revocation or retirement when current work must stop.
+
+All selected model/provider/quota definitions are pinned in the system configuration.
+Changes require an explicit stopped-system revision; calls still pass through the
+same credential-owning broker and the selected alias's quota groups. Neither model
+changes, new revisions nor retirement reset token, turn, event or ancestor budgets.
+Retiring a child frees its live-agent slot, not its consumed allowance. The operator
+cannot retire itself, manage another system/goal, change sandbox profiles, approve
+generated tools, or use these operations to alter protected evaluation prompts.
+Retries return the original durable revision/retirement receipt.
+
+The generic bootstrap grants these operations to new systems. Existing systems
+need an explicit configuration revision to select the new tools and permitted
+model aliases; there is no automatic grant upgrade. Team management works inside
+both bounded and continuous goals. The conversational workspace remains separate.
 
 The text tool has fixed arguments and no shell, arbitrary file path, or network
 option. Its manifest exposes schemas, limits, and the runtime executable's SHA-256.
@@ -531,10 +603,11 @@ Pause lets already claimed work finish and prevents subsequent activations.
 Paused input survives restart; resume does not reactivate stopped work. Stop
 cancels the addressed task subtree, preserves history, and never targets another
 system. Stopping a root/goal waits in `stopping` until leased workers finish cleanup.
-A completed goal becomes inactive even if its final turn finished during a pause.
+A completed bounded goal becomes inactive even if its final turn finished during a
+pause. A continuous goal stays open, including while paused and idle.
 Stopped systems reject input; start a new goal explicitly.
 
-Fixed bounds are eight model turns per task and per agent/goal, creation depth
+In bounded mode, fixed bounds are eight model turns per task and per agent/goal, creation depth
 eight, 64 tasks per goal, 256 events per goal, 4096 lifetime events per system,
 64 outstanding deliveries per recipient, 32 source events per agent/minute,
 8192-byte event payloads, and causation depth 16. Terminal-reply capacity is reserved;
@@ -542,13 +615,15 @@ if a result cannot be delivered, its waiting continuation fails explicitly.
 Source IDs, scope, classification, and correlation are daemon-stamped. Neither
 new agents nor restarts reset allowances.
 
-All turns share the original goal deadline. The default is the shortest quota
+In bounded mode all turns share the original goal deadline. The default is the shortest quota
 wait plus three configured request timeouts for the initial operator's provider
 (60 seconds each when omitted). An authenticated start may set
 `lifetime_seconds` to 1-86400 for scheduled work; agents cannot extend it.
 **Pause does not extend this lifetime**; expired work/input receives a visible
 terminal/dead-letter outcome. Longer lifetimes do not reset turn, event, or token
 budgets, and schedules never start a new goal implicitly.
+See [continuous assistant](#continuous-assistant) for the per-task lifetime and
+rolling-event bounds of an open-ended goal.
 
 ### Memory and wakeups
 
@@ -581,10 +656,14 @@ mailbox delivery commit together. Each schedule/subscription allows 1-8 triggers
 one-shot schedules require one. There are 128 IDs of each kind per system.
 
 Subscriptions support authorized `memory.changed` and same-goal `task.completed`
-notifications, with references rather than leaked contents. Self-memory
-notifications are suppressed. Paused work retains pending wakeups; expiry, stop,
-revocation, event limits, and goal deadlines prevent unauthorized dispatch.
-`runtime.task.wait` persists the continuation and releases its worker. Timers and
+notifications, with references rather than leaked contents. An agent's own memory
+and task-completion notifications are suppressed across task boundaries. Paused
+work retains pending wakeups; expiry, stop,
+revocation, narrowed grants, event limits, and applicable deadlines prevent
+unauthorized dispatch. Continuous triggers can outlive a completed task but retain
+their finite allowance; creating/canceling a trigger while idle creates no work.
+`runtime.task.wait` persists a bounded-goal continuation, or completes the current
+continuous task with its waiting reason, and releases its worker. Timers and
 subscriptions are durable SQLite records, not per-agent goroutines or OS cron jobs.
 
 | System-scoped route | Body / result |
@@ -631,8 +710,11 @@ Creation remains inactive until an explicit start.
 
 **Run a saved initial goal:** open the system from the Systems table, then click
 **Start system**. Leave the replacement goal in **Start options** blank; the daemon
-uses the already-saved goal, not a duplicate. After that goal has been used, the
-form becomes **Start new goal**. A paused system instead offers **Resume system**.
+uses the already-saved goal, not a duplicate. Leave **Continuous assistant** checked
+to keep the team available; uncheck it for one bounded goal. Continuous idle status
+leaves **Send input** available without another start. After a bounded goal finishes
+or the system stops, the form becomes **Start new goal**. A paused system instead
+offers **Resume system**.
 
 **Watch the team:** click **Watch activity** from the dashboard or system overview.
 The Activity view shows the operator and agent creation hierarchy, current task
@@ -650,7 +732,8 @@ Autonomy is bounded, not unattended authority expansion. The operator can store
 plans/results, delegate, draft tools and request protected evaluation. Missing
 toolchains, resource-confined profiles or human-owned checks are visible blockers;
 exact-artifact approval and assignment remain separate human actions. Waiting
-releases the worker but does not extend the eight-turn task cap or goal lifetime.
+releases the worker but does not extend the eight-turn task cap or an existing task
+deadline. Continuous mode permits new bounded tasks, not an unlimited active loop.
 For a paper-trading goal, simulated fills/accounting must come from actual approved
 execution, not invented model output. No live-market access is granted by this setup.
 

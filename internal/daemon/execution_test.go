@@ -77,3 +77,25 @@ func TestProviderTimeoutRetainsReservation(t *testing.T) {
 		t.Fatalf("timeout was refunded or retried: %+v %v", result, err)
 	}
 }
+
+func TestControlledCancellationIsScopedAndReplayable(t *testing.T) {
+	selected, cancelSelected := context.WithCancel(context.Background())
+	defer cancelSelected()
+	unselected, cancelUnselected := context.WithCancel(context.Background())
+	defer cancelUnselected()
+	foreign, cancelForeign := context.WithCancel(context.Background())
+	defer cancelForeign()
+	engine := &executionEngine{active: map[string]activation{
+		"child": {systemID: "system", callID: "selected", cancel: cancelSelected},
+		"peer":  {systemID: "system", callID: "unselected", cancel: cancelUnselected},
+		"other": {systemID: "foreign", callID: "selected", cancel: cancelForeign},
+	}}
+	engine.mu.Lock()
+	for i := 0; i < 2; i++ {
+		engine.cancelControlledCalls(context.Background(), "system", []string{"selected"})
+	}
+	engine.mu.Unlock()
+	if selected.Err() != context.Canceled || unselected.Err() != nil || foreign.Err() != nil {
+		t.Fatalf("cancellation escaped scope: selected=%v peer=%v foreign=%v", selected.Err(), unselected.Err(), foreign.Err())
+	}
+}

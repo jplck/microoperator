@@ -300,7 +300,7 @@ func createSchedule(ctx context.Context, tx *sql.Tx, t TaskRecord, command Sched
 	if err := tx.QueryRowContext(ctx, `SELECT deadline FROM goals WHERE system_id=? AND goal_id=?`, t.SystemID, t.GoalID).Scan(&deadline); err != nil {
 		return "", err
 	}
-	if !next.After(now) || next.UnixMilli() >= deadline {
+	if !next.After(now) || (deadline > 0 && next.UnixMilli() >= deadline) {
 		return "", Invalid("schedule", "occurrence must be future and within the owning goal's lifetime")
 	}
 	var count int
@@ -344,7 +344,7 @@ func createSubscription(ctx context.Context, tx *sql.Tx, t TaskRecord, command S
 	if err := tx.QueryRowContext(ctx, `SELECT deadline FROM goals WHERE system_id=? AND goal_id=?`, t.SystemID, t.GoalID).Scan(&deadline); err != nil {
 		return "", err
 	}
-	if deadline <= now.UnixMilli() {
+	if deadline > 0 && deadline <= now.UnixMilli() {
 		return "", Invalid("subscription", "goal lifetime expired")
 	}
 	id, err := NewID("subscription_")

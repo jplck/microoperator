@@ -38,6 +38,9 @@ func ConversationRequest(cfg Configuration, record SystemRecord, conversation []
 		return nil, 0, Invalid("model", "grant no longer exists")
 	}
 	messages := []ChatMessage{{Role: "system", Content: record.Configuration.Operator.Prompt}}
+	if record.Continuous {
+		messages = append(messages, ChatMessage{Role: "system", Content: "This is a continuous goal. Work autonomously within this task's limits. A final response or runtime.task.wait finishes this piece of work, not the goal or team. Idle consumes no model calls; human input and authorized wakeups start fresh bounded tasks. Preserve useful state in scoped memory/artifacts. Never loop just to stay alive or replay an action whose outcome is unknown."})
+	}
 	if record.Configuration.Constraints != "" {
 		messages = append(messages, ChatMessage{Role: "system", Content: "User constraints (never permission grants):\n" + record.Configuration.Constraints})
 	}

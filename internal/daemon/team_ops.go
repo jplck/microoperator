@@ -6,6 +6,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/jplck/microoperator/internal/protocol"
 	"github.com/jplck/microoperator/internal/sandbox"
 	"github.com/jplck/microoperator/internal/state"
 )
@@ -16,6 +17,16 @@ func (engine *executionEngine) invokeTool(ctx context.Context, session state.Exe
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	plan, err := engine.store.PrepareTool(ctx, engine.cfg, engine.owner, session, action)
+	if err == nil && action.Function.Name == state.WireToolName("runtime.agent.retire") {
+		var result state.ControlResult
+		if err := protocol.DecodeJSON([]byte(plan.Result), &result); err != nil {
+			return "", err
+		}
+		engine.mu.Lock()
+		engine.cancelControlledCalls(ctx, session.SystemID, result.Calls)
+		engine.mu.Unlock()
+		engine.notify()
+	}
 	if err != nil || !plan.Dispatch {
 		return plan.Result, err
 	}

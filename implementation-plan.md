@@ -15,8 +15,8 @@ Do not scaffold every future package, table, or interface at once.
 | 1. Configuration and daemon state | Implemented, inactive systems only | 0 | Validated configuration and persistent system lifecycle |
 | 2. Model broker and one operator | Implemented; extended by 3-4 | 1 | Tracked, rate-limited model turns |
 | 3. Scoped tool registry | Implemented; local promotion added by 7 | 1-2 | Granted shared tools/skills and system-local proposal records |
-| 4. Durable events and agent teams | Implemented, bounded goal execution | 1-3 | Multiple systems self-organize through governed events |
-| 5. Memory and scheduled wakeups | Implemented, bounded by goal lifetime | 4 | Scoped retrieval, subscriptions, and persistent timers |
+| 4. Durable events and agent teams | Implemented, bounded and continuous goals | 1-3 | Multiple systems self-organize through governed events |
+| 5. Memory and scheduled wakeups | Implemented, finite governed wakeups | 4 | Scoped retrieval, subscriptions, and persistent timers |
 | 6. Detached control UI | Implemented, loopback authenticated client | 1-5 | Create, steer, inspect, pause/resume, and stop systems |
 | 7. Learning and generated tools | Implemented, system-local; generated path requires S | 3-6; S before untrusted build/run | Protected evidence, exact approval, explicit assignment and rollback |
 | S. Sandbox and delegation qualification | Linux resource profile qualified on the checked host | 0, 3-4, and README prerequisites | Required isolation profile for generated work, not another service |
@@ -52,6 +52,22 @@ discovers task-scoped capabilities, records inert artifacts, delegates and propo
 missing tools. Name/constraints live in immutable revisions without a SQL migration.
 Build prerequisites, human-owned checks, exact-artifact approval and explicit
 assignment remain mandatory; constraints do not grant authority.
+
+**Operator-managed teams:** Model discovery/selection, immutable child-role/tool
+revisions and recursive retirement extend milestone 4. New systems snapshot the
+configured aliases (or `bootstrap.models`); legacy systems and tool grants require
+explicit revision rather than automatic expansion. Existing tasks retain their
+pins, and accounting survives reorganization. Portable component coverage and a
+Linux/amd64 cross-build cover this extension; its new real daemon/worker scenario
+still requires execution on a supported Linux host.
+
+**Continuous assistants:** `continuous:true` on start keeps the goal/team available
+between bounded tasks; the UI exposes a checked-by-default continuous selector and
+idle status. Input, attachments and authorized triggers wake fresh tasks without
+resetting token allowances. SQLite schema 6 preserves bounded-mode compatibility.
+Portable component/race checks and Linux cross-build/vet cover this extension;
+the new real-process scenarios still require execution on a supported Linux host.
+The requested conversational workspace is not part of this lifecycle extension.
 
 ## 0. Worker-launch foundation
 
@@ -263,7 +279,8 @@ delegation/continuations, tool receipts, and terminal replies transactionally.
 [internal/daemon/runtime_api.go](internal/daemon/runtime_api.go) provide scoped
 pause/resume/stop, attributed input, and bounded team/task/event/artifact inspection.
 One active goal/system and one activation/agent are enforced. A recipient cannot
-lend its broader tools, model, profile, or budget to a narrower task.
+lend broader tools, a different sandbox profile, or additional budget to a narrower
+task. Operator-selected models may differ within the system's pinned allowlist.
 
 Two real systems each run an operator and child with one active slot per system,
 ten total fake-provider calls, native text tools, and scoped reports. Results wake
@@ -282,6 +299,39 @@ actions, and a goal lifetime that pause does not extend. Safe queued work/receip
 resume; ambiguous effects and legacy non-resumable calls fail visibly.
 These team checks alone do not qualify generated code or resource enforcement;
 the resource-confined Linux profile is covered separately by gate S.
+
+**Team-management extension**
+
+`internal/state/agent_management.go` adds paginated permitted-model discovery,
+operator-only child revisions and recursive retirement. Creation also accepts a
+selected model; delegation/admission preserve its pinned revision and quota groups.
+The default operator is instructed and granted these operations. Model/provider/
+quota definitions are pinned for every allowed alias, while legacy single-model
+configuration digests remain compatible. Protected evaluation agents cannot be
+rewritten. Runtime cancellation reuses the same scoped control path as human stop.
+
+Acceptance includes different child models/providers, future-only role changes,
+retirement and receipt replay, denied authority expansion, unchanged accounting and
+retained task history. The integration scenario is
+`TestOperatorManagesAgentModelsAndLifecycle`; native execution is pending Linux
+validation rather than implied by the earlier milestone's results.
+
+**Continuous-goal extension**
+
+`internal/state/continuous.go` creates fresh bounded tasks within one open goal,
+retains bounded recent context and transfers accepted inputs across completion.
+No worker runs just to remain available. Idle, pause, restart and scoped stop
+preserve durable ownership and accounting. Task count is bounded concurrently
+rather than historically; event admission keeps per-task and rolling-day limits.
+Per-task turns/time, broker quotas and cumulative token caps remain enforced.
+
+Component coverage includes more than 64 sequential tasks, retained agents,
+racing input, attachments, pause/restart, finite timers after prior deadlines,
+idle trigger registration, revoked/narrowed grants, event-limit rollback, scoped
+stop, failures/budgets and populated schema-5 migration. Real-process scenarios
+`TestContinuousAssistantInputRestartAndStop` and
+`TestContinuousTimerOutlivesCompletedTask` exercise daemon/worker boundaries;
+their native Linux execution is pending, not implied by portable checks.
 
 ## 5. Memory, subscriptions, and timers
 
@@ -308,7 +358,9 @@ Schema 4 adds revisioned scoped notes, approval-controlled system facts, durable
 occurrences, schedules and subscriptions. Authorization precedes search/pagination;
 retrieval is explicitly untrusted data. The pinned five-field cron parser has
 documented/tested DST behavior and missed-run coalescing. Only an authenticated
-start may authorize a goal lifetime up to 24 hours; all existing budgets remain.
+start may authorize a bounded goal lifetime or continuous task lifetime up to
+24 hours; all existing token budgets remain. Continuous-mode triggers may outlive
+a completed task but retain finite allowances and grant checks.
 Real daemon/worker checks recover memory and paused timers across restart.
 Component checks cover unauthorized reads, shared approval, expiry/deletion,
 deduplication, grant revocation and trigger bounds. Logical memory retention does

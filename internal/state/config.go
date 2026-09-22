@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"path"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -93,9 +94,17 @@ type SystemLimits struct {
 type SystemConfig struct {
 	Name        string         `json:"name,omitempty"`
 	Constraints string         `json:"constraints,omitempty"`
+	Models      []string       `json:"models,omitempty"`
 	Tools       []string       `json:"tools"`
 	Operator    OperatorConfig `json:"operator"`
 	Limits      SystemLimits   `json:"limits"`
+}
+
+func (system SystemConfig) AllowedModels() []string {
+	if system.Models == nil {
+		return []string{system.Operator.Model}
+	}
+	return append([]string{}, system.Models...)
 }
 
 type FieldError struct{ field, problem string }
@@ -340,6 +349,17 @@ func (cfg Configuration) ValidateSystem(system SystemConfig) error {
 	}
 	if _, ok := cfg.Models[system.Operator.Model]; !ok {
 		return Invalid("operator.model", "unknown model alias")
+	}
+	if err := UniqueNames(system.Models, "models"); err != nil {
+		return err
+	}
+	if system.Models != nil && !slices.Contains(system.Models, system.Operator.Model) {
+		return Invalid("models", "must include the operator model")
+	}
+	for _, name := range system.Models {
+		if _, ok := cfg.Models[name]; !ok {
+			return Invalid("models", "unknown model alias")
+		}
 	}
 	if _, ok := cfg.SandboxProfiles[system.Operator.SandboxProfile]; !ok {
 		return Invalid("operator.sandbox_profile", "unknown profile")

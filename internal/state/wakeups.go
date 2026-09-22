@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -20,14 +21,15 @@ func HasTaskTool(t TaskRecord, name string) bool {
 func (engine *workflow) wakeEligible(ctx context.Context, tx *sql.Tx, t TaskRecord, now time.Time) (bool, string, error) {
 	var systemState, agentState, goalControl string
 	var deadline int64
-	if err := tx.QueryRowContext(ctx, `SELECT s.state,a.state,g.control,g.deadline FROM systems s JOIN agents a USING(system_id)
-	 JOIN goals g USING(system_id) WHERE s.system_id=? AND a.agent_id=? AND g.goal_id=?`, t.SystemID, t.AgentID, t.GoalID).Scan(&systemState, &agentState, &goalControl, &deadline); err != nil {
+	var continuous bool
+	if err := tx.QueryRowContext(ctx, `SELECT s.state,a.state,g.control,g.deadline,g.continuous FROM systems s JOIN agents a USING(system_id)
+	 JOIN goals g USING(system_id) WHERE s.system_id=? AND a.agent_id=? AND g.goal_id=?`, t.SystemID, t.AgentID, t.GoalID).Scan(&systemState, &agentState, &goalControl, &deadline, &continuous); err != nil {
 		return false, "", err
 	}
-	if TaskTerminal(t.State) || t.Control == "stopped" || goalControl == "stopped" || agentState == "stopped" || systemState == "stopped" || systemState == "stopping" {
+	if (TaskTerminal(t.State) && !(continuous && t.State == "completed")) || t.Control == "stopped" || goalControl == "stopped" || agentState == "stopped" || systemState == "stopped" || systemState == "stopping" {
 		return false, "target stopped or terminal", nil
 	}
-	if deadline <= now.UnixMilli() {
+	if !continuous && deadline <= now.UnixMilli() {
 		return false, "goal expired", nil
 	}
 	if err := authorizePins(ctx, tx, engine.cfg, t.SystemID, t.Tools); err != nil {
@@ -35,6 +37,17 @@ func (engine *workflow) wakeEligible(ctx context.Context, tx *sql.Tx, t TaskReco
 			return false, err.Error(), nil
 		}
 		return false, "", err
+	}
+	if TaskTerminal(t.State) {
+		a, err := readAgent(ctx, tx, t.SystemID, t.AgentID, 0)
+		if err != nil {
+			return false, "", err
+		}
+		for _, pin := range t.Tools {
+			if !slices.Contains(a.Tools, pin) {
+				return false, "wake source grant narrowed by agent revision", nil
+			}
+		}
 	}
 	if systemState != "running" || agentState != "active" || goalControl != "active" || t.Control != "active" {
 		return false, "", nil
@@ -49,11 +62,13 @@ func (engine *workflow) pumpWakeups(ctx context.Context, tx *sql.Tx, now time.Ti
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_heads SET state='deleted' WHERE expires_at<=? AND state!='deleted'`, now.UnixMilli()); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE subscriptions SET state='expired',reason='subscription lifetime expired' WHERE state='active' AND expires_at<=?`, now.UnixMilli()); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE subscriptions SET state='expired',reason='subscription lifetime expired' WHERE state='active' AND expires_at>0 AND expires_at<=?`, now.UnixMilli()); err != nil {
 		return err
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT t.system_id,t.task_id FROM tasks t JOIN goals g ON g.system_id=t.system_id AND g.goal_id=t.goal_id
-	 WHERE t.state='waiting' AND g.deadline<=? AND NOT EXISTS(SELECT 1 FROM mailboxes m WHERE m.system_id=t.system_id AND m.task_id=t.task_id AND m.state='leased') LIMIT 512`, now.UnixMilli())
+	 WHERE ((g.continuous=0 AND t.state='waiting' AND g.deadline<=?) OR
+	 (g.continuous=1 AND t.state IN ('waiting','queued') AND t.deadline>0 AND t.deadline<=?))
+	 AND NOT EXISTS(SELECT 1 FROM mailboxes m WHERE m.system_id=t.system_id AND m.task_id=t.task_id AND m.state='leased') LIMIT 512`, now.UnixMilli(), now.UnixMilli())
 	if err != nil {
 		return err
 	}
@@ -82,7 +97,7 @@ func (engine *workflow) pumpWakeups(ctx context.Context, tx *sql.Tx, now time.Ti
 	 JOIN systems s ON s.system_id=t.system_id JOIN agents a ON a.system_id=t.system_id AND a.agent_id=t.agent_id
 	 JOIN goals g ON g.system_id=t.system_id AND g.goal_id=t.goal_id
 	 WHERE q.state='active' AND q.next_due<=? AND
-	 (q.expires_at<=? OR t.state IN ('completed','failed','canceled','rejected') OR t.control='stopped' OR a.state='stopped' OR g.control='stopped' OR s.state IN ('stopped','stopping')
+	 ((q.expires_at>0 AND q.expires_at<=?) OR t.state IN ('failed','canceled','rejected') OR (t.state='completed' AND g.continuous=0) OR t.control='stopped' OR a.state='stopped' OR g.control='stopped' OR s.state IN ('stopped','stopping')
 	 OR (s.state='running' AND a.state='active' AND t.control='active' AND g.control='active')) ORDER BY q.next_due,q.schedule_id LIMIT 128`, now.UnixMilli(), now.UnixMilli())
 	if err != nil {
 		return err
@@ -116,7 +131,7 @@ func (engine *workflow) pumpWakeups(ctx context.Context, tx *sql.Tx, now time.Ti
 			ready, reason = false, "scheduling grant unavailable"
 		}
 		state := "active"
-		if s.expires <= now.UnixMilli() {
+		if s.expires > 0 && s.expires <= now.UnixMilli() {
 			ready, reason, state = false, "schedule expired", "expired"
 		}
 		if !ready {
@@ -138,9 +153,8 @@ func (engine *workflow) pumpWakeups(ctx context.Context, tx *sql.Tx, now time.Ti
 		if recorded != 0 {
 			return errors.New("schedule cursor did not advance with its occurrence")
 		}
-		event, emitErr := emitEvent(ctx, tx, t, "schedule.fired", s.creator, "", struct {
-			Content string `json:"content"`
-		}{fmt.Sprintf("Scheduled context (untrusted data; %s): %s", s.id, s.content)}, now)
+		nextTask, event, emitErr := emitTaskWakeup(ctx, tx, t, "schedule.fired", s.creator, "",
+			fmt.Sprintf("Scheduled context (untrusted data; %s): %s", s.id, s.content), now)
 		if emitErr != nil {
 			if !DeniedTask(emitErr) {
 				return emitErr
@@ -150,6 +164,7 @@ func (engine *workflow) pumpWakeups(ctx context.Context, tx *sql.Tx, now time.Ti
 			}
 			continue
 		}
+		t = nextTask
 		if _, err := tx.ExecContext(ctx, `INSERT INTO schedule_occurrences(system_id,schedule_id,due,event_id) VALUES(?,?,?,?)`, s.system, s.id, s.due, event); err != nil {
 			return err
 		}
@@ -163,11 +178,11 @@ func (engine *workflow) pumpWakeups(ctx context.Context, tx *sql.Tx, now time.Ti
 				return err
 			}
 			next = future.UnixMilli()
-			if next < s.expires {
+			if s.expires == 0 || next < s.expires {
 				state = "active"
 			}
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE schedules SET next_due=?,remaining=remaining-1,state=? WHERE system_id=? AND schedule_id=?`, next, state, s.system, s.id); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE schedules SET next_due=?,remaining=remaining-1,state=?,task_id=? WHERE system_id=? AND schedule_id=?`, next, state, t.ID, s.system, s.id); err != nil {
 			return err
 		}
 	}
@@ -197,10 +212,13 @@ func (engine *workflow) notifySubscriptions(ctx context.Context, tx *sql.Tx, sou
 	for _, s := range subscriptions {
 		if s.task == source.ID {
 			continue
-		} // Suppress a task's own memory feedback loop.
+		}
 		t, err := readTask(ctx, tx, source.SystemID, s.task)
 		if err != nil {
 			return err
+		}
+		if source.ID != "" && t.AgentID == source.AgentID {
+			continue
 		}
 		if kind == "task.completed" && t.GoalID != source.GoalID {
 			continue
@@ -212,7 +230,7 @@ func (engine *workflow) notifySubscriptions(ctx context.Context, tx *sql.Tx, sou
 		if err != nil {
 			return err
 		}
-		if s.expires <= now.UnixMilli() {
+		if s.expires > 0 && s.expires <= now.UnixMilli() {
 			ready, reason = false, "subscription expired"
 		}
 		if s.creator != localAdministrator && !HasTaskTool(t, "runtime.events.subscribe") {
@@ -233,9 +251,8 @@ func (engine *workflow) notifySubscriptions(ctx context.Context, tx *sql.Tx, sou
 		if kind == "task.completed" {
 			eventKind = "task.notice"
 		}
-		_, emitErr := emitEvent(ctx, tx, t, eventKind, source.AgentID, cause, struct {
-			Content string `json:"content"`
-		}{fmt.Sprintf("Notification (untrusted data): %s %s", kind, reference)}, now)
+		nextTask, _, emitErr := emitTaskWakeup(ctx, tx, t, eventKind, source.AgentID, cause,
+			fmt.Sprintf("Notification (untrusted data): %s %s", kind, reference), now)
 		if emitErr != nil {
 			if !DeniedTask(emitErr) {
 				return emitErr
@@ -245,7 +262,8 @@ func (engine *workflow) notifySubscriptions(ctx context.Context, tx *sql.Tx, sou
 			}
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE subscriptions SET remaining=remaining-1,state=CASE WHEN remaining=1 THEN 'completed' ELSE 'active' END WHERE system_id=? AND subscription_id=?`, t.SystemID, s.id); err != nil {
+		t = nextTask
+		if _, err := tx.ExecContext(ctx, `UPDATE subscriptions SET remaining=remaining-1,task_id=?,state=CASE WHEN remaining=1 THEN 'completed' ELSE 'active' END WHERE system_id=? AND subscription_id=?`, t.ID, t.SystemID, s.id); err != nil {
 			return err
 		}
 	}

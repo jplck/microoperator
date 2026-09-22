@@ -104,6 +104,7 @@ type StartSystemCommand struct {
 	TokenBudget      int64   `json:"token_budget,omitempty"`
 	LifetimeSeconds  int64   `json:"lifetime_seconds,omitempty"`
 	Stream           bool    `json:"stream,omitempty"`
+	Continuous       bool    `json:"continuous,omitempty"`
 }
 
 type ExecutionRecord struct {
@@ -135,6 +136,7 @@ type ExecutionRecord struct {
 	GoalUsed        int64           `json:"goal_used_tokens"`
 	GoalReserved    int64           `json:"goal_reserved_tokens"`
 	TaskState       string          `json:"task_state"`
+	Continuous      bool            `json:"continuous,omitempty"`
 	QueueWaitMs     int64           `json:"queue_wait_ms"`
 	Retries         int64           `json:"retries"`
 	AgentID         string          `json:"agent_id"`
@@ -149,13 +151,13 @@ func readExecution(ctx context.Context, tx *sql.Tx, systemID, callID string) (e 
 	 c.activation_owner,c.revision,c.model,c.stream,c.state,c.reason,c.response,c.reservation,
 	 c.attempts,c.input_tokens,c.output_tokens,c.usage_known,c.created_at,c.queued_at,c.deadline,
 	 c.wait_deadline,c.dispatched_at,g.prompt,g.token_budget,g.used_tokens,g.reserved_tokens,
-	 COALESCE((SELECT state FROM tasks t WHERE t.system_id=c.system_id AND t.task_id=c.task_id),g.state),c.queue_wait_ms,c.agent_id,c.request,c.actions
+	 COALESCE((SELECT state FROM tasks t WHERE t.system_id=c.system_id AND t.task_id=c.task_id),g.state),c.queue_wait_ms,c.agent_id,c.request,c.actions,g.continuous
 	 FROM model_calls c JOIN goals g ON g.system_id=c.system_id AND g.goal_id=c.goal_id
 	 WHERE c.system_id=? AND (?='' OR c.call_id=?) ORDER BY c.sequence DESC LIMIT 1`,
 		systemID, callID, callID).Scan(&e.CallID, &e.SystemID, &e.GoalID, &e.TaskID, &e.ActivationID,
 		&e.ActivationOwner, &e.Revision, &e.Model, &e.Stream, &e.State, &e.Reason, &e.Response, &e.Reservation,
 		&e.Attempts, &e.InputTokens, &e.OutputTokens, &e.UsageKnown, &e.CreatedAt, &e.QueuedAt, &e.Deadline,
-		&e.WaitDeadline, &e.DispatchedAt, &e.Prompt, &e.GoalBudget, &e.GoalUsed, &e.GoalReserved, &e.TaskState, &e.QueueWaitMs, &e.AgentID, &e.Request, &actions)
+		&e.WaitDeadline, &e.DispatchedAt, &e.Prompt, &e.GoalBudget, &e.GoalUsed, &e.GoalReserved, &e.TaskState, &e.QueueWaitMs, &e.AgentID, &e.Request, &actions, &e.Continuous)
 	if err == nil {
 		err = json.Unmarshal(actions, &e.Actions)
 	}
@@ -225,6 +227,7 @@ func (store *Store) StartSystem(ctx context.Context, principal, key, systemID, o
 		if budget < 1 || budget > record.RemainingTokens {
 			return record, Invalid("token_budget", "exhausted budget or goal cap exceeds remaining system allowance")
 		}
+		record.Continuous = command.Continuous
 		body, reservation, err := ModelRequest(cfg, record, prompt, command.Stream)
 		if err != nil {
 			return record, err
@@ -286,9 +289,10 @@ func (store *Store) StartSystem(ctx context.Context, principal, key, systemID, o
 		if err := protocol.CheckFrame(protocol.Message{Type: "task", ID: callID, Data: prompt}); err != nil {
 			return record, Invalid("goal", "encoded worker input exceeds frame limit")
 		}
-		deadline := now.Add(time.Duration(wait)*time.Second + 3*cfg.Providers[model.Provider].RequestTimeout()).UnixMilli()
-		if command.LifetimeSeconds > 0 {
-			deadline = now.Add(time.Duration(command.LifetimeSeconds) * time.Second).UnixMilli()
+		deadline := cfg.taskDeadline(record.Grants.Model, command.LifetimeSeconds, now)
+		if _, err := tx.ExecContext(ctx, `UPDATE goals SET continuous=?,task_lifetime_seconds=? WHERE system_id=? AND goal_id=?`,
+			command.Continuous, command.LifetimeSeconds, systemID, goalID); err != nil {
+			return record, err
 		}
 		if _, err = tx.ExecContext(ctx, `INSERT INTO model_calls(call_id,system_id,goal_id,task_id,activation_id,
 		 activation_owner,revision,model,stream,state,reservation,created_at,queued_at,deadline,wait_deadline)
@@ -345,7 +349,7 @@ func (store *Store) StopSystem(ctx context.Context, principal, key, systemID str
 		if _, err := tx.ExecContext(ctx, `UPDATE goals SET control='stopped' WHERE system_id=? AND state IN ('queued','running','waiting')`, systemID); err != nil {
 			return record, err
 		}
-		if _, err := stopTasks(ctx, tx, systemID, "system", ""); err != nil {
+		if _, err := stopTasks(ctx, tx, systemID, "system", "", localAdministrator, "stopped by administrator"); err != nil {
 			return record, err
 		}
 		if err := auditExecution(ctx, tx, systemID, principal, "system.stop", record.Revision, now); err != nil {

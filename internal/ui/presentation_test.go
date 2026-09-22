@@ -120,8 +120,17 @@ func TestPendingGoalStartNeedsNoReentryAndErrorsStayVisible(t *testing.T) {
 			{Title: "Start system", Kind: "start", PendingGoal: pending, Revision: 3, Path: "/v1/systems/fixture/start"},
 		}}, 200)
 		goals := 0
+		continuous := 0
 		walkPage(page, func(node *html.Node) {
 			name, _ := attribute(node, "name")
+			if node.Data == "input" && name == "continuous" {
+				continuous++
+				_, checked := attribute(node, "checked")
+				value, _ := attribute(node, "value")
+				if !checked || value != "true" {
+					t.Fatal("start did not offer an explicit continuous default")
+				}
+			}
 			if node.Data == "textarea" && name == "goal" {
 				goals++
 				_, required := attribute(node, "required")
@@ -130,13 +139,24 @@ func TestPendingGoalStartNeedsNoReentryAndErrorsStayVisible(t *testing.T) {
 				}
 			}
 		})
-		if goals != 1 || !strings.Contains(visibleText(page), "Start system") {
+		if goals != 1 || continuous != 1 || !strings.Contains(visibleText(page), "Start system") {
 			t.Fatal("missing start action")
 		}
 	}
 	page, _ := renderFixture(t, uiPage{Title: "Command rejected", Data: `{"error":"token budget exhausted"}`}, 400)
 	if !strings.Contains(visibleText(page), "token budget exhausted") || strings.Contains(visibleText(page), `"error"`) {
 		t.Fatal("hiding JSON also hid a command failure")
+	}
+}
+
+func TestContinuousSystemSummaryShowsIdleWithoutEndingGoal(t *testing.T) {
+	record := state.SystemRecord{ID: "fixture", State: "running", Continuous: true, Idle: true,
+		Execution: &state.ExecutionRecord{Prompt: "Keep helping", Response: "Ready"}}
+	var page uiPage
+	systemSummary(&page, record)
+	if page.State != "waiting" || page.GoalLabel != "Continuous goal" || page.Outcome != "Ready" ||
+		!strings.Contains(page.Notice, "idle") {
+		t.Fatalf("continuous idle presentation: %+v", page)
 	}
 }
 

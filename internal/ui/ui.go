@@ -736,6 +736,14 @@ func (app *controlUI) command(w http.ResponseWriter, r *http.Request) {
 			*out = number
 		}
 		command := state.StartSystemCommand{ExpectedRevision: revision, TokenBudget: budget, LifetimeSeconds: lifetime}
+		switch form.Get("continuous") {
+		case "true":
+			command.Continuous = true
+		case "":
+		default:
+			http.Error(w, "invalid continuous mode", 400)
+			return
+		}
 		if goal := form.Get("goal"); goal != "" {
 			command.Goal = &goal
 		}

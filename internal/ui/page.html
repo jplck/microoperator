@@ -82,11 +82,13 @@ footer{border-top:1px solid var(--line);padding:1.5rem;color:var(--muted);font-s
 {{else if eq .Kind "start"}}
 <input type="hidden" name="expected_revision" value="{{.Revision}}">
 {{if .PendingGoal}}<p>Run your saved initial goal:</p><p class="goal">{{.PendingGoal}}</p>{{else}}<label>New goal<textarea name="goal" maxlength="32768" required></textarea></label>{{end}}
+<label><input type="checkbox" name="continuous" value="true" checked>Continuous assistant: keep this goal and team available until stopped</label>
 <details><summary>Start options</summary>
 {{if .PendingGoal}}<label>Replacement goal (optional; leave blank to use the saved goal)<textarea name="goal" maxlength="32768"></textarea></label>{{end}}
 <label>Token cap (0 = remaining allowance)<input type="number" min="0" name="token_budget" value="0"></label>
-<label>Goal lifetime in seconds (0 = default)<input type="number" min="0" max="86400" name="lifetime_seconds" value="0"></label></details>
+<label>Work lifetime in seconds (per task in continuous mode; 0 = default)<input type="number" min="0" max="86400" name="lifetime_seconds" value="0"></label></details>
 <small>Starting authorizes model calls and budget consumption. Follow progress in Activity.</small>
+<small>Continuous mode waits without model calls when idle. Each task remains bounded; budgets and permissions are never reset.</small>
 {{else if eq .Kind "input"}}
 <label>Instructions, correction or reply<textarea name="content" maxlength="4096" required></textarea></label><details><summary>Address a specific agent</summary><label>Agent ID (blank = operator)<input name="agent_id"></label></details>
 <small>Input is delivered durably at the next safe turn; paused work needs to be resumed.</small>

@@ -83,6 +83,15 @@ defaults; omitted settings use the built-in general-purpose operator. Effective
 defaults are exposed through `GET /v1/system-defaults`. The former JSON `systems`
 map, `launch` request field and launch-configuration endpoint are removed.
 
+`bootstrap.models` optionally narrows the configured model aliases selectable by
+the operator. At creation, omission snapshots all configured aliases into the
+system's immutable `models` list. The list must be nonempty, contain the initial
+operator alias, and reference existing models. Persisted systems with no list
+retain only that initial alias for compatibility; their grants never expand on
+restart. Only an authenticated system revision may change this list. Pin all
+selected model, provider and quota definitions, not only the operator's initial
+model. A changed or removed pinned definition blocks execution pending revision.
+
 The daemon persists the name and constraints in the immutable system configuration
 revision, with a pending goal and a runtime-assigned `system_id`. Names are display
 labels, not identity or authority. Creation never starts work or makes model calls;
@@ -324,7 +333,7 @@ that activation's pinned mapping, not a global bare-name lookup. Local entries
 cannot shadow shared/built-in IDs or resolve to another system's private entries.
 Catalog queries and source/artifact access obey the same scope checks.
 
-The generic bootstrap grants capability inspection, collaborator discovery/proposal,
+The generic bootstrap grants capability inspection, model discovery, collaborator discovery/proposal/revision/retirement,
 delegation/progress/wait, memory put/search, inert artifact put/get, tool proposals
 and protected learning evaluation. It grants no host shell, live-market/network
 tool or ability to approve/assign generated code. Omitted administrative tool lists
@@ -506,11 +515,44 @@ fields; agent-provided labels cannot impersonate a sender or declassify data.
 > checks demonstrating these boundaries; nono alone does not enforce them.
 
 Milestone 4 implements addressed delegation, progress/results, and `user.input`.
-The recipient inherits the intersection of caller-task and recipient pins, cannot
-lend a different model or sandbox profile, and shares creation/delegation ancestor
+The recipient inherits the intersection of caller-task and recipient tool pins,
+may use a different model within the system's pinned model allowlist, cannot
+lend a different sandbox profile, and shares creation/delegation ancestor
 budgets. Component and real-process checks exercise this narrowed authority.
 The reminder still applies before any future privilege expansion, integration,
 generated execution, or richer message/subscription operation.
+
+### Operator-managed team revisions
+
+`runtime.model.list` returns the system's permitted configured aliases in sorted,
+five-entry pages, with provider/model names and output caps but no credentials or
+endpoints. `runtime.agent.propose` accepts an optional `model`; omission inherits
+the creator's model. Different aliases still use the same broker, their configured
+quota groups and all existing goal/system/ancestor accounting. Agent creation
+cannot introduce a provider, enlarge the model allowlist or change the sandbox.
+
+The granted `runtime.agent.revise` and `runtime.agent.retire` operations are also
+restricted to the system operator. They accept a same-goal child ID and its
+`expected_revision`, exposed by `runtime.agent.list`; foreign, stale, stopped
+and operator targets are rejected. Revision replaces the child's prompt, model
+and tools atomically, preserving identity, sandbox, parent, token/turn caps and
+usage. Tools must be exact subsets of the invoking task's pins and the creation
+parent's current pins. Protected evaluation agents cannot be rewritten.
+
+New tasks use the selected revision; already queued, running and waiting tasks
+remain pinned. Retirement stops the target and its creation descendants, cancels
+their task/delegation subtrees through the existing durable control path, and
+requests cancellation of their active workers and evaluations. Parent results,
+unknown external effects and budget reservations retain ordinary cancellation
+semantics. History remains inspectable; freeing live-agent capacity never refunds
+usage. Both operations persist audited receipts with their state changes, so
+retry cannot apply another revision or repeat a lifecycle effect.
+
+Operator base configuration remains human-owned. These operations work in bounded
+and continuous goals; they do not provide cross-goal team reuse or automatic
+executable promotion.
+
+### Durable delivery
 
 Commit events and intended mailbox deliveries atomically in SQLite. Local delivery
 is at least once: deduplicate by event/recipient and correlate resulting actions.
@@ -547,7 +589,7 @@ and sandboxed worker IPC in v1. Do not add per-agent network servers or external
 agent-protocol adapters. The user-facing API and provider/tool integrations do not
 create alternate peer communication paths.
 
-Current bounds are eight turns per task and per agent/goal, creation depth eight,
+Bounded-goal limits are eight turns per task and per agent/goal, creation depth eight,
 64 tasks/goal, 256 events/goal, 4096 events/system, 64 outstanding deliveries per
 recipient, 32 source events per agent/minute, 8192-byte payloads, and causation depth
 16. Reserve terminal-reply capacity; delivery-limit failure explicitly rejects
@@ -560,9 +602,50 @@ and 128 subscription IDs/system, each with 1-8 triggers within the owning goal.
 `robfig/cron/v3` supplies the five-field parser: nonexistent spring times are
 skipped and repeated fall times fire twice at distinct UTC instants. Missed runs
 coalesce into one event; occurrence, cursor, allowance, and mailbox commit together.
-Self-memory notifications are suppressed. Timer/event waits release workers.
+An agent's own memory and task-completion notifications are suppressed, including
+across continuous tasks. Timer/event waits release workers.
 An authenticated start may set `lifetime_seconds` to 1-86400; no worker, schedule,
-pause, or restart can extend that deadline or reset budgets.
+pause, or restart can extend an existing work deadline or reset token budgets.
+
+### Continuous goals
+
+`POST .../start` accepts `continuous:true`; omitted/false retains bounded behavior.
+The user explicitly authorizes an open-ended goal, not an unbounded model loop.
+A final response or `runtime.task.wait` completes only its task. The goal remains
+waiting, the system running or paused, and the team available until explicit stop.
+Expose `continuous` and derived `idle` on the system. Idle means no active tasks;
+it holds no worker or model-call slot and generates no work by itself.
+
+Human input/attachments and authorized schedules/subscriptions can create a fresh
+task for an idle agent in the same goal. Accepted input racing with completion
+keeps its event identity, receipt and original provenance while its mailbox delivery
+moves to the fresh task. No new goal, identity or token allowance is created.
+Each task retains eight turns and a bounded deadline; the goal-wide agent turn
+counter remains cumulative accounting rather than a continuous-mode stop condition.
+`lifetime_seconds` bounds each task in this mode. Later idle wakes prepare their
+first call/deadline only when claimed, while explicit initial start still prepares
+its first call immediately. Delegated tasks share the originating task deadline.
+
+Use the agent's current revision for fresh work, intersecting its grants with the
+previous task's pins; old tasks keep their pinned revisions. Model context contains
+the goal plus at most eight recent non-tool user/assistant messages, bounded to
+8192 bytes, with an explicit older-history/unknown-outcome warning. Full history
+stays durable, and scoped memory/artifacts hold long-lived working context.
+
+For continuous goals, the 64-task cap counts active tasks, the 256-event cap applies
+per task, and the system's 4096-event cap uses a rolling 24-hour window. Other
+mailbox, source-rate, causation, concurrency, storage and cumulative token limits
+remain. Standing triggers have no goal deadline but retain finite 1-8 allowances,
+authorization/revocation checks and missed-run coalescing. Successful tasks retain
+their triggers; failed or unknown tasks do not automatically retry. Trigger
+rejection rolls back any fresh task creation without losing known outcomes or
+disabling other systems.
+
+Pause/restart preserve idle goals and queued input. Stop, including stopping an
+idle operator, cancels the open goal, team and wakeups without affecting another
+system. A later start still requires a new goal. SQLite schema 6 adds continuous
+mode, task-lifetime configuration and task deadlines; existing goals migrate as
+bounded with deadlines preserved. Configuration schema remains 1.
 
 ## 5. LLM admission and permissions
 
@@ -796,7 +879,7 @@ implemented. See the [current API](README.md#control-api). Browser access uses a
 separate authenticated loopback UI; arbitrary worker paths remain unsupported.
 System/operator grant revisions require stopped work. Child assignment creates
 a new revision for future tasks without rewriting running/waiting pins; revocation
-blocks pinned work too. SQLite schema 5 migrates existing state and resumes
+blocks pinned work too. SQLite schema 6 migrates existing state and resumes
 eligible durable queued work, including safe 429 retries, while paused work stays
 paused. Completed decisions and local receipts are reused without repeating effects.
 Uncertain model/subprocess dispatches fail visibly and remain recorded for
@@ -881,13 +964,16 @@ creates a new goal/run under current grants, without replaying canceled work,
 reactivating old timers, or resetting consumed system budgets.
 
 The implemented scheduler uses one active goal/system, one activation/agent,
-per-system active-agent limits, and a global 64-activation ceiling. All descendants
-and continuations share the original goal deadline (by default the shortest quota
+per-system active-agent limits, and a global 64-activation ceiling. In bounded mode,
+all descendants and continuations share the original goal deadline (by default the shortest quota
 wait plus three configured request timeouts for the initial operator's provider,
 60 seconds each by default, or an explicitly authorized
 `lifetime_seconds` up to 86400). Pause does not extend that deadline:
 expired input/work gets a visible dead-letter/terminal outcome, and a goal that
-finishes during pause becomes inactive. Indefinite standing work is not enabled.
+finishes during pause becomes inactive. In continuous mode, these are per-task
+deadlines, not an expiry of the open goal; idle goals survive pause and restart.
+The start form defaults its explicit continuous checkbox on and explains the
+per-task lifetime. This lifecycle does not implement a conversational workspace.
 
 The UI owns no runtime state. Default to restricted local sockets for CLI/local
 clients and authenticated loopback access for the browser UI; loopback alone is
@@ -962,6 +1048,11 @@ boundaries whose behavior they claim to verify.
 - **Configuration and grants:** reject unknown fields, invalid references, escaping
   paths, missing credentials, and unauthorized revisions. Error responses and
   inspection endpoints must not expose secrets.
+- **Operator-managed teams:** verify configured model discovery and selection,
+  model/provider/quota pins, immutable child revisions and recursive retirement.
+  Deny missing grants, foreign/stale targets and protected-evaluation rewrites;
+  retain old task pins, history and cumulative usage. Retried operations must reuse
+  their receipts, and mixed-model delegation must preserve narrowed tool grants.
 - **Tool registry:** verify shared/local listing and artifact isolation, pinned
   version resolution, non-shadowing IDs, system/agent/task grant intersections,
   and revocation of pinned tools. Skill dependencies cannot install or grant tools;
@@ -1009,6 +1100,11 @@ boundaries whose behavior they claim to verify.
    status/source/results through the owning system's Tools page; another system
    cannot list or fetch it. Publication requires explicit administrative import,
    preserves private artifacts, and does not automatically grant the new shared tool.
+7. **Operator-managed models and lifecycle:** through real worker IPC, discover
+   aliases, create/delegate to a child on another provider, revise its role/model,
+   delegate again and retire it. Assert selected provider requests, old/new task
+   revisions, cumulative accounting and no replay after restart. Cancellation
+   targets only the retired work; missing or changed model grants fail closed.
 
 Use only temporary fixture files and controlled endpoints for denial checks;
 never probe real credentials or unrelated user data. Run irreversible sandbox

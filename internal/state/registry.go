@@ -35,7 +35,7 @@ type ModelToolCall struct {
 	} `json:"function"`
 }
 
-var BuiltinNames = []string{"runtime.capabilities", "runtime.artifact.put", "runtime.artifact.get", "runtime.text.analyze", "runtime.agent.list", "runtime.agent.propose", "runtime.task.delegate", "runtime.task.progress", "runtime.tool.propose",
+var BuiltinNames = []string{"runtime.capabilities", "runtime.artifact.put", "runtime.artifact.get", "runtime.text.analyze", "runtime.model.list", "runtime.agent.list", "runtime.agent.propose", "runtime.agent.revise", "runtime.agent.retire", "runtime.task.delegate", "runtime.task.progress", "runtime.tool.propose",
 	"runtime.memory.put", "runtime.memory.search", "runtime.schedule.create", "runtime.schedule.cancel", "runtime.events.subscribe", "runtime.events.unsubscribe", "runtime.task.wait", "runtime.learning.evaluate"}
 
 func BuiltinTool(name string) (ToolConfig, bool) {
@@ -51,8 +51,14 @@ func BuiltinTool(name string) (ToolConfig, bool) {
 		description = "Analyze text in a confined reviewed subprocess; optionally save its JSON report as a scoped artifact."
 	case "runtime.agent.list":
 		description = "List collaborators in this system and goal. Names and descriptions never grant authority."
+	case "runtime.model.list":
+		description = "List configured model aliases allowed by this system's pinned configuration, with provider names and output limits. Never grants a new model."
 	case "runtime.agent.propose":
-		description = "Propose a child with a prompt, narrower tools and a token cap. Returns an agent_id; does not delegate work."
+		description = "Propose a child with a prompt, narrower tools, an optional allowed model alias and a token cap. Returns an agent_id; does not delegate work."
+	case "runtime.agent.revise":
+		description = "Operator only: replace a same-goal child's prompt, allowed model and narrowed tools in a new revision for future tasks. Existing task pins and budgets do not change."
+	case "runtime.agent.retire":
+		description = "Operator only: stop a same-goal child and its creation descendants, cancel their delegated work, and retain history and usage. Cannot retire the operator."
 	case "runtime.task.delegate":
 		description = "Delegate to a same-goal collaborator with intersected task grants. The parent waits without occupying a worker slot."
 	case "runtime.task.progress":
@@ -112,10 +118,14 @@ func ExecutableSchema(name string, Tool ToolConfig) (ModelFunction, error) {
 		parameters = `{"type":"object","properties":{"artifact_id":{"type":"string","maxLength":64}},"required":["artifact_id"],"additionalProperties":false}`
 	case "runtime.text.analyze":
 		parameters = `{"type":"object","properties":{"text":{"type":"string","maxLength":4096},"save_artifact":{"type":"boolean"}},"required":["text"],"additionalProperties":false}`
-	case "runtime.agent.list":
+	case "runtime.agent.list", "runtime.model.list":
 		parameters = `{"type":"object","properties":{"after":{"type":"string","maxLength":64}},"additionalProperties":false}`
 	case "runtime.agent.propose":
-		parameters = `{"type":"object","properties":{"name":{"type":"string","maxLength":64,"pattern":"^[a-z][a-z0-9_.-]{0,63}$"},"prompt":{"type":"string","maxLength":4096},"tools":{"type":"array","items":{"type":"string"}},"token_budget":{"type":"integer","minimum":1}},"required":["name","prompt","tools","token_budget"],"additionalProperties":false}`
+		parameters = `{"type":"object","properties":{"name":{"type":"string","maxLength":64,"pattern":"^[a-z][a-z0-9_.-]{0,63}$"},"prompt":{"type":"string","maxLength":4096},"model":{"type":"string","maxLength":64},"tools":{"type":"array","items":{"type":"string"}},"token_budget":{"type":"integer","minimum":1}},"required":["name","prompt","tools","token_budget"],"additionalProperties":false}`
+	case "runtime.agent.revise":
+		parameters = `{"type":"object","properties":{"agent_id":{"type":"string","maxLength":64},"expected_revision":{"type":"integer","minimum":1},"prompt":{"type":"string","maxLength":4096},"model":{"type":"string","maxLength":64},"tools":{"type":"array","items":{"type":"string"}}},"required":["agent_id","expected_revision","prompt","model","tools"],"additionalProperties":false}`
+	case "runtime.agent.retire":
+		parameters = `{"type":"object","properties":{"agent_id":{"type":"string","maxLength":64},"expected_revision":{"type":"integer","minimum":1}},"required":["agent_id","expected_revision"],"additionalProperties":false}`
 	case "runtime.task.delegate":
 		parameters = `{"type":"object","properties":{"agent_id":{"type":"string"},"prompt":{"type":"string"}},"required":["agent_id","prompt"],"additionalProperties":false}`
 	case "runtime.task.progress":
