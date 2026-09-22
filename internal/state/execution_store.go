@@ -7,6 +7,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/jplck/microoperator/internal/protocol"
 )
 
 // ponytail: cap reviewed activations at 64; configure this only when measured workloads need more.
@@ -281,7 +283,7 @@ func (store *Store) StartSystem(ctx context.Context, principal, key, systemID, o
 		if err != nil {
 			return record, err
 		}
-		if err := checkFrame(message{Type: "task", ID: callID, Data: prompt}); err != nil {
+		if err := protocol.CheckFrame(protocol.Message{Type: "task", ID: callID, Data: prompt}); err != nil {
 			return record, Invalid("goal", "encoded worker input exceeds frame limit")
 		}
 		deadline := now.Add(time.Duration(wait)*time.Second + 3*ProviderTimeout).UnixMilli()

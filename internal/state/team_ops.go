@@ -7,6 +7,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/jplck/microoperator/internal/protocol"
 )
 
 // delegationLedger includes both creation ancestry and delegation ancestry.
@@ -202,6 +204,7 @@ type ProposeAgentArgs struct {
 	Tools       []string `json:"tools"`
 	TokenBudget int64    `json:"token_budget"`
 }
+
 type DelegateArgs struct {
 	AgentID string `json:"agent_id"`
 	Prompt  string `json:"prompt"`
@@ -216,7 +219,7 @@ func (engine *workflow) builtin(ctx context.Context, tx *sql.Tx, e ExecutionReco
 			CheckID  string `json:"check_id"`
 			Baseline string `json:"baseline_name"`
 		}
-		if err := DecodeJSON([]byte(arguments), &args); err != nil {
+		if err := protocol.DecodeJSON([]byte(arguments), &args); err != nil {
 			return "", err
 		}
 		command := EvaluateCommand{ToolID: args.ToolID, Version: args.Version, CheckID: args.CheckID, TaskID: t.ID}
@@ -255,7 +258,7 @@ func (engine *workflow) builtin(ctx context.Context, tx *sql.Tx, e ExecutionReco
 		var args struct {
 			After string `json:"after"`
 		}
-		if err := DecodeJSON([]byte(arguments), &args); err != nil {
+		if err := protocol.DecodeJSON([]byte(arguments), &args); err != nil {
 			return "", err
 		}
 		rows, err := tx.QueryContext(ctx, `SELECT agent_id FROM agents WHERE system_id=? AND (goal_id=? OR agent_id=(SELECT operator_id FROM systems WHERE system_id=?)) AND agent_id>? ORDER BY agent_id LIMIT 6`, t.SystemID, t.GoalID, t.SystemID, args.After)
@@ -288,7 +291,7 @@ func (engine *workflow) builtin(ctx context.Context, tx *sql.Tx, e ExecutionReco
 		return ToolOutcome(map[string]any{"agents": result, "next": next})
 	case "runtime.agent.propose":
 		var args ProposeAgentArgs
-		if err := DecodeJSON([]byte(arguments), &args); err != nil {
+		if err := protocol.DecodeJSON([]byte(arguments), &args); err != nil {
 			return "", err
 		}
 		if !ConfigName.MatchString(args.Name) || strings.TrimSpace(args.Prompt) == "" || len(args.Prompt) > 4096 || args.TokenBudget < 1 {
@@ -352,7 +355,7 @@ func (engine *workflow) builtin(ctx context.Context, tx *sql.Tx, e ExecutionReco
 		return ToolOutcome(map[string]string{"agent_id": id})
 	case "runtime.task.delegate":
 		var args DelegateArgs
-		if err := DecodeJSON([]byte(arguments), &args); err != nil {
+		if err := protocol.DecodeJSON([]byte(arguments), &args); err != nil {
 			return "", err
 		}
 		if args.AgentID == t.AgentID || strings.TrimSpace(args.Prompt) == "" || len(args.Prompt) > 4096 {
@@ -434,7 +437,7 @@ func (engine *workflow) builtin(ctx context.Context, tx *sql.Tx, e ExecutionReco
 		var args struct {
 			Message string `json:"message"`
 		}
-		if err := DecodeJSON([]byte(arguments), &args); err != nil {
+		if err := protocol.DecodeJSON([]byte(arguments), &args); err != nil {
 			return "", err
 		}
 		if t.Parent == "" || strings.TrimSpace(args.Message) == "" || len(args.Message) > 2048 {
@@ -450,7 +453,7 @@ func (engine *workflow) builtin(ctx context.Context, tx *sql.Tx, e ExecutionReco
 		return `{"recorded":true}`, nil
 	case "runtime.tool.propose":
 		var args DraftCommand
-		if err := DecodeJSON([]byte(arguments), &args); err != nil {
+		if err := protocol.DecodeJSON([]byte(arguments), &args); err != nil {
 			return "", err
 		}
 		id, err := submitDraft(ctx, tx, engine.cfg, t.SystemID, t.AgentID, t.GoalID, t.ID, args)
@@ -467,7 +470,7 @@ func updateConversation(ctx context.Context, tx *sql.Tx, t TaskRecord) error {
 	if err != nil {
 		return err
 	}
-	if len(data) > maxFrame {
+	if len(data) > protocol.MaxFrame {
 		return Invalid("conversation", "continuation exceeds 64 KiB")
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE tasks SET conversation=? WHERE system_id=? AND task_id=?`, data, t.SystemID, t.ID)

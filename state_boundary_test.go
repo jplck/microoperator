@@ -14,6 +14,15 @@ import (
 )
 
 func TestPersistenceBoundary(t *testing.T) {
+	dependencies := map[string]string{
+		"internal/daemon":   "protocol provider sandbox state",
+		"internal/provider": "protocol state",
+		"internal/sandbox":  "protocol state",
+		"internal/state":    "protocol",
+		"internal/ui":       "protocol state",
+		"internal/worker":   "protocol state",
+		"internal/protocol": "",
+	}
 	err := filepath.WalkDir(".", func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -37,6 +46,15 @@ func TestPersistenceBoundary(t *testing.T) {
 			name, err := strconv.Unquote(imp.Path.Value)
 			if err != nil {
 				return err
+			}
+			const internalPrefix = "github.com/jplck/microoperator/internal/"
+			if strings.HasPrefix(name, internalPrefix) {
+				if allowed, constrained := dependencies[filepath.ToSlash(filepath.Dir(path))]; constrained {
+					dependency := strings.TrimPrefix(name, internalPrefix)
+					if !strings.Contains(" "+allowed+" ", " "+dependency+" ") {
+						t.Errorf("%s imports a package outside its layer: %s", path, name)
+					}
+				}
 			}
 			if name == "database/sql" || name == "modernc.org/sqlite" {
 				if !inside {

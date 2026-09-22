@@ -37,19 +37,32 @@ race-enabled real-process suite passed on Linux/amd64 WSL2. Boundary and JSON
 compatibility checks guard the extraction; macOS was not rerun. Other databases
 remain future implementations, not an added adapter or generic repository layer.
 
+**Package organization:** Complete. The root remains the CLI entry point, with
+daemon orchestration, provider transport, sandboxing, reviewed workers, the UI,
+shared protocol code, and persistence in separate internal packages. See the
+[package map](README.md#project-layout). Existing CLI commands and persisted/wire
+formats are unchanged. Unit/component checks, integration-tagged vet, and the
+race-enabled real-process suite passed on Linux/amd64 WSL2 after relocation;
+macOS was not rerun. Package dependency checks preserve the execution and storage
+boundaries.
+
 ## 0. Worker-launch foundation
 
 The phase-0 demo command and placeholder worker have been removed. Retained
 infrastructure and coverage:
 
 - [go.mod](go.mod) and `go.sum`: Go module with a pinned nono-go dependency.
-- [main.go](main.go): command dispatch, internal sandbox launcher, sanitized
-  environment, bounded JSON framing, deadline/cancellation handling, and
-  process-group supervision.
-- [sandbox_linux.go](sandbox_linux.go) and [sandbox_darwin.go](sandbox_darwin.go):
+- [main.go](main.go): command dispatch and process signal handling.
+- [internal/sandbox/launcher.go](internal/sandbox/launcher.go): internal launcher,
+  sanitized environment, deadline/cancellation handling, and process supervision.
+- [internal/protocol/message.go](internal/protocol/message.go): bounded JSON framing.
+- [internal/sandbox/sandbox_linux.go](internal/sandbox/sandbox_linux.go) and
+  [internal/sandbox/sandbox_darwin.go](internal/sandbox/sandbox_darwin.go):
   platform runtime grants and Linux/amd64's supplemental socket-denying seccomp filter.
-- [main_test.go](main_test.go): framing, argument validation, and output bounds.
-- [sandbox_integration_test.go](sandbox_integration_test.go): integration-only
+- [cli_test.go](cli_test.go), [internal/protocol/message_test.go](internal/protocol/message_test.go),
+  and [internal/sandbox/launcher_test.go](internal/sandbox/launcher_test.go):
+  argument validation, framing, and output bounds.
+- [internal/daemon/sandbox_integration_test.go](internal/daemon/sandbox_integration_test.go): integration-only
   target fixtures and actual subprocess filesystem/connection checks,
   thread/descendant inheritance, descriptor and
   environment isolation, failed setup, deadlines, and cancellation.
@@ -90,8 +103,9 @@ merely because a configuration is declared.
 
 **Implemented scope and evidence**
 
-[config.go](config.go), [internal/state/store.go](internal/state/store.go), and
-[daemon.go](daemon.go) implement
+[internal/daemon/config.go](internal/daemon/config.go),
+[internal/state/store.go](internal/state/store.go), and
+[internal/daemon/daemon.go](internal/daemon/daemon.go) implement
 strict JSON loading, private SQLite state with explicit migrations, immutable
 configuration/revision/grant snapshots, pending initial goals, audit records,
 durable command receipts, and an authenticated Unix-socket control API.
@@ -131,12 +145,12 @@ zero. Stop terminates the selected worker without affecting another system.
 
 **Implemented scope and evidence**
 
-[execution.go](execution.go) supplies reviewed, confined operator activations,
+[internal/daemon/execution.go](internal/daemon/execution.go) supplies reviewed, confined operator activations,
 with correlated private-pipe IPC and a durable goal/task/call identity.
-[provider.go](provider.go) implements bounded Chat Completions and SSE consumption;
+[internal/provider/chat.go](internal/provider/chat.go) implements bounded Chat Completions and SSE consumption;
 credentials stay in the daemon, redirects/proxies are disabled, and model text is
 never interpreted as code or a tool call.
-[broker.go](broker.go) performs provider calls through the durable admission and
+[internal/daemon/broker.go](internal/daemon/broker.go) performs provider calls through the durable admission and
 settlement operations in [internal/state/broker.go](internal/state/broker.go).
 These share quota groups across aliases, rotate admission across systems, and
 atomically reserve goal/system allowances. Request buckets,
@@ -180,7 +194,7 @@ Registry presence alone never authorizes execution.
 
 [internal/state/registry.go](internal/state/registry.go),
 [internal/state/tools.go](internal/state/tools.go), and
-[runtime_api.go](runtime_api.go) supply one scoped catalog, pinned function schemas and
+[internal/daemon/runtime_api.go](internal/daemon/runtime_api.go) supply one scoped catalog, pinned function schemas and
 skill context, immutable private drafts/provenance, explicit assignments, revocation,
 and receipts. `runtime.text.analyze` is fixed reviewed Go code, not a demo worker
 or an interpreter for proposed source. Its real subprocess uses the selected
@@ -219,11 +233,13 @@ All agent communication stays on the event/mailbox path.
 **Implemented scope and evidence**
 
 [internal/state/team_store.go](internal/state/team_store.go) migrates SQLite to schema 3, preserving prior
-receipts, calls, attempts, and reservations. [team.go](team.go) schedules activations
+receipts, calls, attempts, and reservations.
+[internal/daemon/team.go](internal/daemon/team.go) schedules activations
 using durable claims in [internal/state/team.go](internal/state/team.go);
 [internal/state/team_ops.go](internal/state/team_ops.go) commits proposals,
 delegation/continuations, tool receipts, and terminal replies transactionally.
-[controls.go](controls.go) and [runtime_api.go](runtime_api.go) provide scoped
+[internal/daemon/controls.go](internal/daemon/controls.go) and
+[internal/daemon/runtime_api.go](internal/daemon/runtime_api.go) provide scoped
 pause/resume/stop, attributed input, and bounded team/task/event/artifact inspection.
 One active goal/system and one activation/agent are enforced. A recipient cannot
 lend its broader tools, model, profile, or budget to a narrower task.

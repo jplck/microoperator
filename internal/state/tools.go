@@ -6,6 +6,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/jplck/microoperator/internal/protocol"
 )
 
 type PreparedTool struct {
@@ -121,7 +123,7 @@ func (store *Store) PrepareTool(ctx context.Context, cfg Configuration, owner st
 		return PreparedTool{Result: result}, tx.Commit()
 	}
 	var args TextArguments
-	if err := DecodeJSON([]byte(action.Function.Arguments), &args); err != nil {
+	if err := protocol.DecodeJSON([]byte(action.Function.Arguments), &args); err != nil {
 		return plan, err
 	}
 	if len(args.Text) > 4096 {
@@ -173,6 +175,7 @@ func (store *Store) PrepareTool(ctx context.Context, cfg Configuration, owner st
 	}
 	return PreparedTool{Dispatch: true, Generated: generated, Arguments: args, Profile: profile, Binary: binary, execution: e, action: action, task: t}, nil
 }
+
 func (store *Store) CompleteTool(ctx context.Context, plan PreparedTool, output TextResult, artifact []byte, generatedOutput string, runErr error) (result string, err error) {
 	if !plan.Dispatch || plan.execution.CallID == "" || plan.action.ID == "" {
 		return "", Invalid("tool", "completion requires a prepared dispatch")

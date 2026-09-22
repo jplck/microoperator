@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+
+	"github.com/jplck/microoperator/internal/protocol"
 )
 
 type mailboxCandidate struct {
@@ -153,7 +155,7 @@ func (engine *workflow) claim(ctx context.Context, now time.Time) (record System
 				Response string `json:"response"`
 				Reason   string `json:"reason"`
 			}
-			if err := DecodeJSON(c.payload, &payload); err != nil {
+			if err := protocol.DecodeJSON(c.payload, &payload); err != nil {
 				return record, e, false, err
 			}
 			child, err := readTask(ctx, tx, t.SystemID, payload.TaskID)
@@ -297,7 +299,7 @@ func (engine *workflow) consumeInputs(ctx context.Context, tx *sql.Tx, t *TaskRe
 		var payload struct {
 			Content string `json:"content"`
 		}
-		if err := DecodeJSON(data, &payload); err != nil {
+		if err := protocol.DecodeJSON(data, &payload); err != nil {
 			return errors.Join(err, rows.Close())
 		}
 		t.Conversation = append(t.Conversation, ChatMessage{Role: "user", Content: payload.Content})

@@ -2,12 +2,9 @@ package state
 
 import (
 	"crypto/sha256"
-
 	"encoding/hex"
-
 	"go/parser"
 	"go/token"
-
 	"path/filepath"
 	"runtime"
 	"strconv"

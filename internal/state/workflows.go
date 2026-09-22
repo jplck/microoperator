@@ -6,32 +6,10 @@ package state
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
-	"errors"
 	"time"
 )
 
-const (
-	maxFrame           = 64 * 1024
-	localAdministrator = "local-admin"
-)
-
-type message struct {
-	Type string `json:"type"`
-	Data string `json:"data,omitempty"`
-	ID   string `json:"id,omitempty"`
-}
-
-func checkFrame(value message) error {
-	data, err := json.Marshal(value)
-	if err != nil {
-		return err
-	}
-	if len(data)+1 > maxFrame {
-		return errors.New("JSON frame exceeds size limit")
-	}
-	return nil
-}
+const localAdministrator = "local-admin"
 
 // workflow contains operation-local policy and ownership, never worker processes,
 // HTTP clients or goroutines. The daemon serializes its live activation snapshot.
@@ -44,6 +22,7 @@ type workflow struct {
 }
 
 type activation struct{ systemID string }
+
 type admission struct {
 	store *Store
 	cfg   Configuration

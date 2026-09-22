@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/jplck/microoperator/internal/protocol"
 )
 
 type LearningEvaluation struct {
@@ -28,7 +30,7 @@ func readEvaluation(ctx context.Context, tx *sql.Tx, systemID, id string) (e Lea
 	if err != nil {
 		return e, err
 	}
-	if err := DecodeJSON(baseline, &e.Baseline); err != nil {
+	if err := protocol.DecodeJSON(baseline, &e.Baseline); err != nil {
 		return e, err
 	}
 	e.Cases, err = ProtectedCases(cases)

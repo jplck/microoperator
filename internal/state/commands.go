@@ -7,6 +7,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/jplck/microoperator/internal/protocol"
 )
 
 func (store *Store) mutation(ctx context.Context, key string, systemID string, operation string, body any,
@@ -39,6 +41,7 @@ func (store *Store) mutation(ctx context.Context, key string, systemID string, o
 		return record, err
 	})
 }
+
 func (store *Store) ProposeTool(ctx context.Context, cfg Configuration, key string, systemID string, command DraftCommand) (SystemRecord, error) {
 	return store.mutation(ctx, key, systemID, "tool.propose", command, func(tx *sql.Tx, s SystemRecord) (any, error) {
 		id, err := submitDraft(ctx, tx, cfg, s.ID, localAdministrator, "", "", command)
@@ -181,6 +184,7 @@ func (store *Store) AddInput(ctx context.Context, key string, systemID string, c
 		return map[string]string{"event_id": id, "state": "pending"}, err
 	})
 }
+
 func (store *Store) Control(ctx context.Context, cfg Configuration, key string, systemID string, scope string, action string, id string) (SystemRecord, error) {
 	if (action != "pause" && action != "resume" && action != "stop") || (scope != "system" && scope != "goal" && scope != "agent") {
 		return SystemRecord{}, ErrSystemNotFound
@@ -258,6 +262,7 @@ func (store *Store) Control(ctx context.Context, cfg Configuration, key string, 
 		return result, nil
 	})
 }
+
 func (store *Store) AddAttachment(ctx context.Context, key string, systemID string, command AttachmentCommand) (SystemRecord, error) {
 	if strings.TrimSpace(command.Name) == "" || len(command.Name) > 128 || strings.ContainsAny(command.Name, "/\\\x00") || len(command.Content) == 0 || len(command.Content) > 3072 || strings.ContainsRune(command.Content, '\x00') {
 		return SystemRecord{}, Invalid("attachment", "requires a display name and 1-3072 bytes of UTF-8 text; host paths and executable uploads are not supported")
@@ -301,6 +306,7 @@ func (store *Store) AddAttachment(ctx context.Context, key string, systemID stri
 		return map[string]string{"artifact_id": id, "event_id": event, "state": "pending"}, nil
 	})
 }
+
 func (store *Store) PutMemory(ctx context.Context, cfg Configuration, owner string, key string, systemID string, command MemoryCommand) (SystemRecord, error) {
 	engine := &workflow{store: store, cfg: cfg, owner: owner}
 	return store.mutation(ctx, key, systemID, "memory.put", command, func(tx *sql.Tx, s SystemRecord) (any, error) {
@@ -363,6 +369,7 @@ func (store *Store) ChangeMemoryState(ctx context.Context, cfg Configuration, ow
 		return map[string]any{"memory_id": id, "revision": revision, "action": action}, nil
 	})
 }
+
 func activeInputTask(ctx context.Context, tx *sql.Tx, s SystemRecord, agentID string) (TaskRecord, error) {
 	if s.State != "running" && s.State != "paused" {
 		return TaskRecord{}, ErrExecutionConflict
@@ -385,6 +392,7 @@ func activeInputTask(ctx context.Context, tx *sql.Tx, s SystemRecord, agentID st
 	}
 	return task, err
 }
+
 func (store *Store) CreateSchedule(ctx context.Context, cfg Configuration, key string, systemID string, command ScheduleCommand) (SystemRecord, error) {
 	return store.mutation(ctx, key, systemID, "schedule.create", command, func(tx *sql.Tx, s SystemRecord) (any, error) {
 		t, err := activeInputTask(ctx, tx, s, command.AgentID)
@@ -398,6 +406,7 @@ func (store *Store) CreateSchedule(ctx context.Context, cfg Configuration, key s
 		return map[string]string{"schedule_id": id, "state": "active"}, err
 	})
 }
+
 func (store *Store) CreateSubscription(ctx context.Context, cfg Configuration, key string, systemID string, command SubscriptionCommand) (SystemRecord, error) {
 	return store.mutation(ctx, key, systemID, "subscription.create", command, func(tx *sql.Tx, s SystemRecord) (any, error) {
 		t, err := activeInputTask(ctx, tx, s, command.AgentID)
@@ -492,6 +501,7 @@ func (store *Store) AddFeedback(ctx context.Context, key string, systemID string
 		return map[string]string{"feedback_id": id}, err
 	})
 }
+
 func (store *Store) EvaluateLearning(ctx context.Context, cfg Configuration, owner string, key string, systemID string, command EvaluateCommand) (SystemRecord, error) {
 	engine := &workflow{store: store, cfg: cfg, owner: owner}
 	return store.mutation(ctx, key, systemID, "learning.evaluate", command, func(tx *sql.Tx, s SystemRecord) (any, error) {
@@ -537,7 +547,7 @@ func (store *Store) ApproveLearning(ctx context.Context, cfg Configuration, key 
 			return nil, err
 		}
 		var def ToolConfig
-		if err := DecodeJSON(definition, &def); err != nil {
+		if err := protocol.DecodeJSON(definition, &def); err != nil {
 			return nil, err
 		}
 		if def.Kind == "executable" {

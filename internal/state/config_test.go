@@ -2,7 +2,6 @@ package state
 
 import (
 	"path/filepath"
-
 	"testing"
 )
 

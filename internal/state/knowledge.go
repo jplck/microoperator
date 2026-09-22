@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jplck/microoperator/internal/protocol"
 	"github.com/robfig/cron/v3"
 )
 
@@ -23,6 +24,7 @@ type MemoryCommand struct {
 	Artifacts        []string `json:"artifacts"`
 	RetentionSeconds int64    `json:"retention_seconds"`
 }
+
 type MemoryQuery struct {
 	Scope   string `json:"scope"`
 	Owner   string `json:"owner_id,omitempty"`
@@ -30,6 +32,7 @@ type MemoryQuery struct {
 	After   string `json:"after,omitempty"`
 	Pending bool   `json:"include_pending,omitempty"`
 }
+
 type MemoryEntry struct {
 	ID         string   `json:"memory_id"`
 	Revision   int64    `json:"revision"`
@@ -239,6 +242,7 @@ type ScheduleCommand struct {
 	Content  string `json:"content"`
 	Budget   int    `json:"trigger_budget"`
 }
+
 type SubscriptionCommand struct {
 	AgentID string `json:"agent_id,omitempty"`
 	Type    string `json:"type"`
@@ -357,7 +361,7 @@ func (engine *workflow) knowledgeTool(ctx context.Context, tx *sql.Tx, e Executi
 	switch name {
 	case "runtime.memory.put":
 		var command MemoryCommand
-		if err := DecodeJSON([]byte(arguments), &command); err != nil {
+		if err := protocol.DecodeJSON([]byte(arguments), &command); err != nil {
 			return "", err
 		}
 		entry, err := putMemory(ctx, tx, t, command, false, now)
@@ -372,7 +376,7 @@ func (engine *workflow) knowledgeTool(ctx context.Context, tx *sql.Tx, e Executi
 		return ToolOutcome(map[string]any{"memory_id": entry.ID, "revision": entry.Revision, "state": entry.State})
 	case "runtime.memory.search":
 		var query MemoryQuery
-		if err := DecodeJSON([]byte(arguments), &query); err != nil {
+		if err := protocol.DecodeJSON([]byte(arguments), &query); err != nil {
 			return "", err
 		}
 		result, err := searchMemory(ctx, tx, t, query, false, now)
@@ -382,7 +386,7 @@ func (engine *workflow) knowledgeTool(ctx context.Context, tx *sql.Tx, e Executi
 		return ToolOutcome(result)
 	case "runtime.schedule.create":
 		var command ScheduleCommand
-		if err := DecodeJSON([]byte(arguments), &command); err != nil {
+		if err := protocol.DecodeJSON([]byte(arguments), &command); err != nil {
 			return "", err
 		}
 		if command.AgentID != "" {
@@ -395,7 +399,7 @@ func (engine *workflow) knowledgeTool(ctx context.Context, tx *sql.Tx, e Executi
 		return ToolOutcome(map[string]string{"schedule_id": id, "state": "active"})
 	case "runtime.events.subscribe":
 		var command SubscriptionCommand
-		if err := DecodeJSON([]byte(arguments), &command); err != nil {
+		if err := protocol.DecodeJSON([]byte(arguments), &command); err != nil {
 			return "", err
 		}
 		if command.AgentID != "" {
@@ -410,7 +414,7 @@ func (engine *workflow) knowledgeTool(ctx context.Context, tx *sql.Tx, e Executi
 		var command struct {
 			ID string `json:"schedule_id"`
 		}
-		if err := DecodeJSON([]byte(arguments), &command); err != nil {
+		if err := protocol.DecodeJSON([]byte(arguments), &command); err != nil {
 			return "", err
 		}
 		result, err := tx.ExecContext(ctx, `UPDATE schedules SET state='canceled',reason='canceled by owning task' WHERE system_id=? AND task_id=? AND schedule_id=?`, t.SystemID, t.ID, command.ID)
@@ -429,7 +433,7 @@ func (engine *workflow) knowledgeTool(ctx context.Context, tx *sql.Tx, e Executi
 		var command struct {
 			ID string `json:"subscription_id"`
 		}
-		if err := DecodeJSON([]byte(arguments), &command); err != nil {
+		if err := protocol.DecodeJSON([]byte(arguments), &command); err != nil {
 			return "", err
 		}
 		result, err := tx.ExecContext(ctx, `UPDATE subscriptions SET state='canceled',reason='canceled by owning task' WHERE system_id=? AND task_id=? AND subscription_id=?`, t.SystemID, t.ID, command.ID)
@@ -448,7 +452,7 @@ func (engine *workflow) knowledgeTool(ctx context.Context, tx *sql.Tx, e Executi
 		var args struct {
 			Reason string `json:"reason"`
 		}
-		if err := DecodeJSON([]byte(arguments), &args); err != nil {
+		if err := protocol.DecodeJSON([]byte(arguments), &args); err != nil {
 			return "", err
 		}
 		if strings.TrimSpace(args.Reason) == "" || len(args.Reason) > 1024 {

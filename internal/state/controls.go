@@ -3,9 +3,7 @@ package state
 import (
 	"context"
 	"database/sql"
-
 	"errors"
-
 	"time"
 )
 

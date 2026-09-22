@@ -2,8 +2,9 @@ package state
 
 import (
 	"encoding/json"
-
 	"time"
+
+	"github.com/jplck/microoperator/internal/protocol"
 )
 
 const (
@@ -74,7 +75,7 @@ func ConversationRequest(cfg Configuration, record SystemRecord, conversation []
 	if err != nil {
 		return nil, 0, err
 	}
-	if len(body) > maxFrame {
+	if len(body) > protocol.MaxFrame {
 		return nil, 0, Invalid("model.call", "encoded provider request exceeds 64 KiB")
 	}
 	headroom := model.InputHeadroomPercent

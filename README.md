@@ -615,6 +615,27 @@ there is no unsandboxed fallback. On Linux/amd64, the extra seccomp filter denie
 rejects alternate syscall ABIs. It cannot be loosened by a worker and is inherited
 across exec, new threads, and descendants. The parent's networking is unchanged.
 
+## Project layout
+
+The root [`main.go`](main.go) handles CLI dispatch and signals. The implementation
+is split into internal packages, not separate services:
+
+| Package | Responsibility |
+| --- | --- |
+| [`internal/daemon`](internal/daemon) | Daemon lifecycle, authenticated control API, scheduling, model admission coordination, and task execution |
+| [`internal/state`](internal/state) | SQLite, migrations, persisted types, scoped artifacts, and atomic durable workflows |
+| [`internal/provider`](internal/provider) | Bounded model HTTP/SSE transport, response validation, and credential redaction |
+| [`internal/sandbox`](internal/sandbox) | Fresh-process confinement, supervision, resource limits, and confined generated builds/runs |
+| [`internal/worker`](internal/worker) | Reviewed operator and text-tool worker entry points |
+| [`internal/ui`](internal/ui) | Detached browser UI and its authenticated Unix-socket client |
+| [`internal/protocol`](internal/protocol) | Shared bounded JSON framing, strict decoding, and API token format validation |
+
+Unit tests stay with their packages. Cross-boundary daemon/worker/UI/sandbox
+integration tests stay together under `internal/daemon`; their harness builds the
+real executable from the repository root. Root tests cover CLI arguments and
+package/persistence boundaries. All existing `go run .`, `go build -o microoperator .`,
+and `go test ./...` commands remain valid.
+
 ## Persistence architecture
 
 [`internal/state`](internal/state) contains the SQLite implementation, migrations,
@@ -634,7 +655,9 @@ semantics; it would not be a driver-only replacement.
 Storage-internal tests live alongside the implementation. Runtime/API tests call
 the public workflows and may inspect their own temporary database through a
 separate test-only connection. An architecture check rejects production SQL
-imports outside storage and database types in its public contract.
+imports outside storage and database types in its public contract. It also guards
+package dependencies: the UI cannot embed the daemon, and state/protocol code
+cannot depend on execution or transport implementations.
 
 ## Checks
 

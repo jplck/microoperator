@@ -45,6 +45,17 @@ multi-tenant isolation.
 single-machine daemon owns the shared resources and trust boundary without a
 distributed control plane. Its logical components are not separate services.
 
+The root CLI dispatches into `internal/daemon`, `internal/ui`, `internal/worker`,
+and `internal/sandbox`. The daemon coordinates execution using `internal/provider`
+for model transport, `internal/sandbox` for native process boundaries, and
+`internal/state` for atomic durable operations. `internal/protocol` supplies
+dependency-free framing and strict JSON parsing shared by these packages.
+Package separation does not grant authority or replace sandbox enforcement:
+workers still use validated IPC, the UI remains a separate API client, and
+irreversible native restrictions still run only in a fresh launcher immediately
+before exec. Shared persisted types remain in `internal/state`; no backend
+interface, service, or dependency is added by this organization.
+
 Prompts, retrieved content, tool output, and generated programs are untrusted.
 Sandboxing limits worker access to host resources; it does not protect against a
 compromised host administrator or kernel, or control remote services after

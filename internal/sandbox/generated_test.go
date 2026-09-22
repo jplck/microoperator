@@ -1,0 +1,54 @@
+//go:build darwin || linux
+
+package sandbox
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/jplck/microoperator/internal/state"
+)
+
+func TestGeneratedSourceAndProfileFailClosed(t *testing.T) {
+	for _, source := range []string{`package main; import "example.com/tool"`, `package main; import "C"`, `package other`, `package main; import "../secret"`, `broken`} {
+		if err := state.ValidateGeneratedSource(source); err == nil {
+			t.Fatalf("accepted %q", source)
+		}
+	}
+	if err := state.ValidateGeneratedSource(`package main; import "strings"; func Process(s string)(string,error){return strings.ToUpper(s),nil}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.GeneratedProfile(state.SandboxConfig{}); err == nil {
+		t.Fatal("generated work accepted an unqualified profile")
+	}
+}
+
+func TestToolchainDigestIncludesContentAndRejectsSymlinks(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(root, "compiler")
+	if err := os.WriteFile(file, []byte("one"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	first, err := ToolchainDigest(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("two"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	second, err := ToolchainDigest(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatal("toolchain mutation not detected")
+	}
+	if err := os.Symlink(file, filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ToolchainDigest(context.Background(), root); err == nil {
+		t.Fatal("toolchain symlink accepted")
+	}
+}

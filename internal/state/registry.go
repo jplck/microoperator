@@ -8,10 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/jplck/microoperator/internal/protocol"
 )
 
 type FunctionSchema struct {
@@ -19,10 +20,12 @@ type FunctionSchema struct {
 	Description string          `json:"description"`
 	Parameters  json.RawMessage `json:"parameters"`
 }
+
 type ModelFunction struct {
 	Type     string         `json:"type"`
 	Function FunctionSchema `json:"function"`
 }
+
 type ModelToolCall struct {
 	ID       string `json:"id"`
 	Type     string `json:"type"`
@@ -307,7 +310,7 @@ func (store *Store) Catalog(ctx context.Context, cfg Configuration, principal, s
 		}
 		if e.Kind == "executable" && e.ExecutableDigest != "" {
 			var def ToolConfig
-			if err := DecodeJSON(definition, &def); err != nil {
+			if err := protocol.DecodeJSON(definition, &def); err != nil {
 				return nil, err
 			}
 			schema, err := ExecutableSchema(e.ID, def)
@@ -401,6 +404,7 @@ type TextArguments struct {
 	Text string `json:"text"`
 	Save bool   `json:"save_artifact"`
 }
+
 type TextResult struct {
 	Runes    int    `json:"runes"`
 	Words    int    `json:"words"`
@@ -441,7 +445,7 @@ func ValidateArguments(schema FunctionSchema, arguments string) error {
 		return err
 	}
 	var fields map[string]json.RawMessage
-	if err := DecodeJSON([]byte(arguments), &fields); err != nil {
+	if err := protocol.DecodeJSON([]byte(arguments), &fields); err != nil {
 		return Invalid("arguments", err.Error())
 	}
 	if fields == nil {

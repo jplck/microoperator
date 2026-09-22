@@ -4,13 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-
-	"testing"
-	"time"
-)
-import (
 	"fmt"
 	"strings"
+	"testing"
+	"time"
 )
 
 func knowledgeConfiguration(t *testing.T) Configuration {
@@ -171,6 +168,7 @@ func TestCronCalendarAndDST(t *testing.T) {
 		}
 	}
 }
+
 func TestScheduleCoalescesAndReplaysOnlyItsReceipt(t *testing.T) {
 	cfg := knowledgeConfiguration(t)
 	engine, id := fixtureTeamEngine(t, cfg)

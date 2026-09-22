@@ -2,11 +2,8 @@ package state
 
 import (
 	"errors"
-
 	"os"
-
 	"regexp"
-
 	"syscall"
 )
 

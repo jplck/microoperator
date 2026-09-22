@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/jplck/microoperator/internal/protocol"
 )
 
 type ProtectedCase struct {
@@ -60,7 +62,7 @@ func loadLocalTools(ctx context.Context, tx *sql.Tx, systemID string, pins []Too
 			return nil, Invalid("tool", "local definition digest does not match its exact pin")
 		}
 		var Tool ToolConfig
-		if err := DecodeJSON(definition, &Tool); err != nil {
+		if err := protocol.DecodeJSON(definition, &Tool); err != nil {
 			return nil, err
 		}
 		actual, _, err := JsonDigest(Tool)
@@ -227,7 +229,7 @@ func ReadGeneratedArtifact(dataDir, systemID, digest string) ([]byte, error) {
 
 func ProtectedCases(data []byte) ([]ProtectedCase, error) {
 	var cases []ProtectedCase
-	if err := DecodeJSON(data, &cases); err != nil {
+	if err := protocol.DecodeJSON(data, &cases); err != nil {
 		return nil, err
 	}
 	if len(cases) < 1 || len(cases) > 2 {

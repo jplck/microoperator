@@ -125,6 +125,7 @@ type ListArtifactsResult struct {
 	Artifacts []ListArtifactsArtifactEntry `json:"artifacts"`
 	Next      string                       `json:"next,omitempty"`
 }
+
 type ListArtifactsArtifactEntry struct {
 	ID     string `json:"artifact_id"`
 	GoalID string `json:"goal_id"`
@@ -165,6 +166,7 @@ type ListToolCallsResult struct {
 	Calls []ListToolCallsReceipt `json:"calls"`
 	Next  string                 `json:"next,omitempty"`
 }
+
 type ListToolCallsReceipt struct {
 	CallID  string `json:"call_id"`
 	ID      string `json:"tool_call_id"`
@@ -228,6 +230,7 @@ func (store *Store) Artifact(ctx context.Context, systemID string, artifactID st
 }
 
 type ListTriggersResult map[string]any
+
 type ListTriggersEntry struct {
 	ID        string `json:"id"`
 	TaskID    string `json:"task_id"`
