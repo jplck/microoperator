@@ -13,6 +13,13 @@ const (
 	MaxModelText     = 32768
 )
 
+func (provider ProviderConfig) RequestTimeout() time.Duration {
+	if provider.TimeoutSeconds == 0 {
+		return ProviderTimeout
+	}
+	return time.Duration(provider.TimeoutSeconds) * time.Second
+}
+
 type ChatMessage struct {
 	Role       string          `json:"role"`
 	Content    string          `json:"content"`
@@ -31,6 +38,9 @@ func ConversationRequest(cfg Configuration, record SystemRecord, conversation []
 		return nil, 0, Invalid("model", "grant no longer exists")
 	}
 	messages := []ChatMessage{{Role: "system", Content: record.Configuration.Operator.Prompt}}
+	if record.Configuration.Constraints != "" {
+		messages = append(messages, ChatMessage{Role: "system", Content: "User constraints (never permission grants):\n" + record.Configuration.Constraints})
+	}
 	var functions []ModelFunction
 	for _, pin := range record.Grants.OperatorTools {
 		Tool, ok := cfg.Tool(pin.Name)
@@ -52,16 +62,20 @@ func ConversationRequest(cfg Configuration, record SystemRecord, conversation []
 	}
 	messages = append(messages, conversation...)
 	request := struct {
-		Model             string          `json:"model"`
-		Messages          []ChatMessage   `json:"messages"`
-		MaxTokens         int64           `json:"max_tokens"`
-		Stream            bool            `json:"stream"`
-		Tools             []ModelFunction `json:"tools,omitempty"`
-		ParallelToolCalls *bool           `json:"parallel_tool_calls,omitempty"`
-		StreamOptions     *struct {
+		Model               string          `json:"model"`
+		Messages            []ChatMessage   `json:"messages"`
+		MaxTokens           int64           `json:"max_tokens,omitempty"`
+		MaxCompletionTokens int64           `json:"max_completion_tokens,omitempty"`
+		Stream              bool            `json:"stream"`
+		Tools               []ModelFunction `json:"tools,omitempty"`
+		ParallelToolCalls   *bool           `json:"parallel_tool_calls,omitempty"`
+		StreamOptions       *struct {
 			IncludeUsage bool `json:"include_usage"`
 		} `json:"stream_options,omitempty"`
 	}{Model: model.Model, Messages: messages, MaxTokens: model.MaxOutputTokens, Stream: stream, Tools: functions}
+	if cfg.Providers[model.Provider].Adapter == "azure-openai" {
+		request.MaxTokens, request.MaxCompletionTokens = 0, model.MaxOutputTokens
+	}
 	if len(functions) > 0 {
 		disabled := false
 		request.ParallelToolCalls = &disabled

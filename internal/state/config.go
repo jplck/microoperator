@@ -10,6 +10,7 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 const MaxConfigBytes = 1 << 20
@@ -22,6 +23,7 @@ var (
 type Configuration struct {
 	RuntimeDigest   string                    `json:"-"`
 	Learning        *LearningConfig           `json:"learning,omitempty"`
+	Bootstrap       *SystemConfig             `json:"bootstrap,omitempty"`
 	SchemaVersion   int                       `json:"schema_version"`
 	DataDir         string                    `json:"data_dir"`
 	Providers       map[string]ProviderConfig `json:"providers"`
@@ -29,13 +31,13 @@ type Configuration struct {
 	QuotaGroups     map[string]QuotaConfig    `json:"quota_groups"`
 	SandboxProfiles map[string]SandboxConfig  `json:"sandbox_profiles"`
 	Tools           map[string]ToolConfig     `json:"tools"`
-	Systems         map[string]SystemConfig   `json:"systems"`
 }
 
 type ProviderConfig struct {
-	Adapter   string `json:"adapter"`
-	BaseURL   string `json:"base_url"`
-	APIKeyEnv string `json:"api_key_env"`
+	Adapter        string `json:"adapter"`
+	BaseURL        string `json:"base_url"`
+	APIKeyEnv      string `json:"api_key_env"`
+	TimeoutSeconds int64  `json:"timeout_seconds,omitempty"`
 }
 
 type ModelConfig struct {
@@ -89,9 +91,11 @@ type SystemLimits struct {
 }
 
 type SystemConfig struct {
-	Tools    []string       `json:"tools"`
-	Operator OperatorConfig `json:"operator"`
-	Limits   SystemLimits   `json:"limits"`
+	Name        string         `json:"name,omitempty"`
+	Constraints string         `json:"constraints,omitempty"`
+	Tools       []string       `json:"tools"`
+	Operator    OperatorConfig `json:"operator"`
+	Limits      SystemLimits   `json:"limits"`
 }
 
 type FieldError struct{ field, problem string }
@@ -117,7 +121,12 @@ func (cfg Configuration) Validate(lookupEnv func(string) (string, bool)) error {
 			return Invalid("providers", "invalid name")
 		}
 		field := "providers." + name
-		if provider.Adapter != "openai-chat-completions" {
+		if provider.TimeoutSeconds < 0 || provider.TimeoutSeconds > 3600 {
+			return Invalid(field+".timeout_seconds", "must be 0 (default) or 1-3600")
+		}
+		switch provider.Adapter {
+		case "openai-chat-completions", "ollama", "azure-openai":
+		default:
 			return Invalid(field+".adapter", "unsupported adapter configuration")
 		}
 		endpoint, err := url.Parse(provider.BaseURL)
@@ -132,13 +141,27 @@ func (cfg Configuration) Validate(lookupEnv func(string) (string, bool)) error {
 		if endpoint.Scheme != "https" && !(endpoint.Scheme == "http" && loopback) {
 			return Invalid(field+".base_url", "requires HTTPS, except for loopback HTTP")
 		}
-		if !EnvName.MatchString(provider.APIKeyEnv) {
-			return Invalid(field+".api_key_env", "must name an environment variable")
+		switch provider.Adapter {
+		case "ollama":
+			if !loopback || strings.TrimRight(endpoint.Path, "/") != "/v1" {
+				return Invalid(field+".base_url", "Ollama requires a loopback endpoint ending in /v1")
+			}
+		case "azure-openai":
+			if endpoint.Scheme != "https" || !strings.HasSuffix(strings.TrimRight(endpoint.Path, "/"), "/openai/v1") {
+				return Invalid(field+".base_url", "Azure requires an HTTPS endpoint ending in /openai/v1")
+			}
 		}
-		// Check availability only. Credential values never enter the configuration
-		// object, SQLite snapshots, inspection responses, or validation errors.
-		if value, ok := lookupEnv(provider.APIKeyEnv); !ok || strings.TrimSpace(value) == "" {
-			return Invalid(field+".api_key_env", "required credential is unavailable")
+		if provider.Adapter == "openai-chat-completions" {
+			if !EnvName.MatchString(provider.APIKeyEnv) {
+				return Invalid(field+".api_key_env", "must name an environment variable")
+			}
+			// Check availability only. Credential values never enter configuration,
+			// SQLite snapshots, inspection responses, or validation errors.
+			if value, ok := lookupEnv(provider.APIKeyEnv); !ok || strings.TrimSpace(value) == "" || strings.ContainsAny(value, "\r\n") {
+				return Invalid(field+".api_key_env", "required credential is unavailable or invalid")
+			}
+		} else if provider.APIKeyEnv != "" {
+			return Invalid(field+".api_key_env", "must be omitted for this adapter")
 		}
 	}
 	for name, quota := range cfg.QuotaGroups {
@@ -250,12 +273,9 @@ func (cfg Configuration) Validate(lookupEnv func(string) (string, bool)) error {
 			return err
 		}
 	}
-	for name, system := range cfg.Systems {
-		if !ConfigName.MatchString(name) {
-			return Invalid("systems", "invalid launch-configuration name")
-		}
-		if err := cfg.ValidateSystem(system); err != nil {
-			return fmt.Errorf("systems.%s: %w", name, err)
+	if cfg.Bootstrap != nil {
+		if _, err := cfg.BootstrapSystem(); err != nil {
+			return fmt.Errorf("bootstrap: %w", err)
 		}
 	}
 	return nil
@@ -307,6 +327,14 @@ func UniqueNames(names []string, field string) error {
 }
 
 func (cfg Configuration) ValidateSystem(system SystemConfig) error {
+	if system.Name != "" {
+		if err := validateSystemName(system.Name); err != nil {
+			return err
+		}
+	}
+	if len(system.Constraints) > 4096 || !utf8.ValidString(system.Constraints) || strings.ContainsRune(system.Constraints, 0) {
+		return Invalid("constraints", "must be at most 4096 UTF-8 bytes without NUL")
+	}
 	if strings.TrimSpace(system.Operator.Prompt) == "" || len(system.Operator.Prompt) > 32768 {
 		return Invalid("operator.prompt", "must contain 1-32768 bytes")
 	}

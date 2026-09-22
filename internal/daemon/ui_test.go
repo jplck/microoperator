@@ -14,17 +14,20 @@ import (
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
+	"golang.org/x/net/html"
+
+	"github.com/jplck/microoperator/internal/state"
 	webui "github.com/jplck/microoperator/internal/ui"
 )
 
 const fixtureUIToken = "fixture-ui-token-not-a-real-secret-123456789"
 
-func fixtureUI(t *testing.T) (*httptest.Server, *executionEngine) {
+func fixtureUI(t *testing.T, cfg state.Configuration) (*httptest.Server, *executionEngine) {
 	t.Helper()
-	cfg := knowledgeConfiguration(t)
 	engine, id := fixtureTeamEngine(t, cfg)
 	listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "daemon.sock"))
 	if err != nil {
@@ -84,8 +87,61 @@ func hiddenUIValue(t *testing.T, body, name string) string {
 	return match[1]
 }
 
+func uiCommandForm(t *testing.T, body, target string) url.Values {
+	t.Helper()
+	page, err := html.Parse(strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	attr := func(node *html.Node, name string) string {
+		for _, field := range node.Attr {
+			if field.Key == name {
+				return field.Val
+			}
+		}
+		return ""
+	}
+	var result url.Values
+	var walk func(*html.Node)
+	walk = func(node *html.Node) {
+		if node.Type == html.ElementNode && node.Data == "form" {
+			form := url.Values{}
+			var fields func(*html.Node)
+			fields = func(child *html.Node) {
+				if name := attr(child, "name"); name != "" {
+					if child.Data == "input" {
+						form.Set(name, attr(child, "value"))
+					} else if child.Data == "textarea" {
+						text := ""
+						if child.FirstChild != nil {
+							text = child.FirstChild.Data
+						}
+						form.Set(name, text)
+					}
+				}
+				for nested := child.FirstChild; nested != nil; nested = nested.NextSibling {
+					fields(nested)
+				}
+			}
+			fields(node)
+			if form.Get("path") == target {
+				result = form
+			}
+			return
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(page)
+	if result == nil {
+		t.Fatalf("missing command form for %s", target)
+	}
+	return result
+}
+
 func TestUIAuthenticationCSRFAndDurableCommands(t *testing.T) {
-	ui, engine := fixtureUI(t)
+	ui, engine := fixtureUI(t, knowledgeConfiguration(t))
 	response, err := ui.Client().Get(ui.URL)
 	if err != nil {
 		t.Fatal(err)
@@ -94,23 +150,30 @@ func TestUIAuthenticationCSRFAndDurableCommands(t *testing.T) {
 	if response.StatusCode != 401 {
 		t.Fatal("UI allowed unauthenticated browsing")
 	}
+	if policy := response.Header.Get("Referrer-Policy"); policy != "same-origin" {
+		t.Fatalf("native forms need a same-origin Origin without cross-origin referrers; policy=%q", policy)
+	}
 	status, body := uiResponse(t, ui, "GET", "/", nil, "")
 	if status != 200 {
 		t.Fatal(body)
 	}
 	csrf, key := hiddenUIValue(t, body, "csrf"), hiddenUIValue(t, body, "key")
-	form := url.Values{"kind": {"create"}, "path": {"/v1/systems"}, "method": {"POST"}, "return": {"/"}, "key": {key}, "csrf": {csrf}, "launch": {"research"}, "goal": {"<script>alert('fixture')</script>"}}
-	if status, _ := uiResponse(t, ui, "POST", "/command", form, "http://attacker.invalid"); status != 403 {
-		t.Fatal("cross-origin command accepted")
+	form := url.Values{"kind": {"create"}, "path": {"/v1/systems"}, "method": {"POST"}, "return": {"/"}, "key": {key}, "csrf": {csrf}, "name": {"research"}, "goal": {"<script>alert('fixture')</script>"}}
+	for _, origin := range []string{"http://attacker.invalid", "null", strings.Replace(ui.URL, "http:", "https:", 1)} {
+		if status, _ := uiResponse(t, ui, "POST", "/command", form, origin); status != 403 {
+			t.Fatalf("cross-origin command accepted: %s", origin)
+		}
 	}
 	form.Set("csrf", "forged")
-	if status, _ := uiResponse(t, ui, "POST", "/command", form, ""); status != 403 {
-		t.Fatal("forged CSRF command accepted")
+	for _, origin := range []string{"", ui.URL} {
+		if status, _ := uiResponse(t, ui, "POST", "/command", form, origin); status != 403 {
+			t.Fatal("forged CSRF command accepted")
+		}
 	}
 	assertCount(t, engine.store, "systems", 0)
 	form.Set("csrf", csrf)
-	for i := 0; i < 2; i++ {
-		status, body := uiResponse(t, ui, "POST", "/command", form, "")
+	for _, origin := range []string{ui.URL, ""} {
+		status, body := uiResponse(t, ui, "POST", "/command", form, origin)
 		if status != 201 || strings.Contains(body, "<script>") {
 			t.Fatalf("command failed or HTML escaped incorrectly: %d %s", status, body)
 		}
@@ -120,7 +183,7 @@ func TestUIAuthenticationCSRFAndDurableCommands(t *testing.T) {
 	if err := testDB(t, engine.store).QueryRow(`SELECT system_id FROM systems`).Scan(&id); err != nil {
 		t.Fatal(err)
 	}
-	for _, route := range []string{"/systems/" + id, "/systems/" + id + "/tools", "/systems/" + id + "/memory", "/systems/" + id + "/schedules", "/systems/" + id + "/learning", "/systems/" + id + "/learning-checks", "/systems/" + id + "/learning-feedback", "/broker", "/tools"} {
+	for _, route := range []string{"/systems/" + id, "/systems/" + id + "/activity", "/systems/" + id + "/tools", "/systems/" + id + "/memory", "/systems/" + id + "/schedules", "/systems/" + id + "/learning", "/systems/" + id + "/learning-checks", "/systems/" + id + "/learning-feedback", "/broker", "/tools"} {
 		if status, body := uiResponse(t, ui, "GET", route, nil, ""); status != 200 {
 			t.Fatalf("%s: %d %s", route, status, body)
 		}
@@ -154,8 +217,47 @@ func TestUIAuthenticationCSRFAndDurableCommands(t *testing.T) {
 	}
 }
 
+func TestUIGoalCreationWithoutTemplates(t *testing.T) {
+	for _, configured := range []bool{false, true} {
+		t.Run(strconv.FormatBool(configured), func(t *testing.T) {
+			cfg := knowledgeConfiguration(t)
+			if !configured {
+				cfg.Bootstrap = nil
+			}
+			ui, engine := fixtureUI(t, cfg)
+			status, page := uiResponse(t, ui, "GET", "/", nil, "")
+			if status != http.StatusOK || strings.Contains(page, `name="launch"`) ||
+				!strings.Contains(page, `name="name" maxlength="128" required`) ||
+				!strings.Contains(page, "Default token budget:") || !strings.Contains(page, `name="constraints"`) {
+				t.Fatalf("UI did not offer goal-driven creation: %d %s", status, page)
+			}
+			form := url.Values{
+				"kind": {"create"}, "path": {"/v1/systems"}, "method": {"POST"}, "return": {"/"},
+				"csrf": {hiddenUIValue(t, page, "csrf")}, "key": {hiddenUIValue(t, page, "key")},
+				"name": {""}, "goal": {"Record without execution."},
+				"constraints": {"Only use simulated data."}, "token_budget": {"40000"},
+			}
+			if status, _ := uiResponse(t, ui, "POST", "/command", form, ui.URL); status != http.StatusBadRequest {
+				t.Fatal("missing name bypassed daemon validation")
+			}
+			assertCount(t, engine.store, "systems", 0)
+			form.Set("name", "Paper trading experiment")
+			if status, body := uiResponse(t, ui, "POST", "/command", form, ui.URL); status != http.StatusCreated {
+				t.Fatalf("goal did not create a system: %d %s", status, body)
+			}
+			assertCount(t, engine.store, "systems", 1)
+			assertCount(t, engine.store, "model_attempts", 0)
+			records, _, err := engine.store.ListSystems(context.Background(), localAdministrator, "")
+			if err != nil || len(records) != 1 || records[0].Configuration.Name != "Paper trading experiment" ||
+				records[0].Configuration.Constraints != "Only use simulated data." || records[0].Configuration.Limits.TokenBudget != 40000 {
+				t.Fatalf("creation form lost name/constraints/budget: %+v %v", records, err)
+			}
+		})
+	}
+}
+
 func TestUITextAttachmentIsBoundedScopedAndIdempotent(t *testing.T) {
-	ui, engine := fixtureUI(t)
+	ui, engine := fixtureUI(t, knowledgeConfiguration(t))
 	var configID string
 	if err := testDB(t, engine.store).QueryRow(`SELECT config_id FROM config_snapshots LIMIT 1`).Scan(&configID); err != nil {
 		t.Fatal(err)
@@ -187,6 +289,7 @@ func TestUITextAttachmentIsBoundedScopedAndIdempotent(t *testing.T) {
 		}
 		request.SetBasicAuth("operator", fixtureUIToken)
 		request.Header.Set("Content-Type", writer.FormDataContentType())
+		request.Header.Set("Origin", ui.URL)
 		response, err := ui.Client().Do(request)
 		if err != nil {
 			t.Fatal(err)

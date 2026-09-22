@@ -41,10 +41,10 @@ func TestAgentMemorySurvivesRealRestart(t *testing.T) {
 			w.WriteHeader(400)
 		}
 	})
-	def := cfg.Systems["research"]
+	def := *cfg.Bootstrap
 	def.Tools = []string{"runtime.memory.put", "runtime.memory.search"}
 	def.Operator.Tools = def.Tools
-	cfg.Systems["research"] = def
+	cfg.Bootstrap = &def
 	q := cfg.QuotaGroups["account"]
 	q.BurstRequests = 10
 	q.TokensPerMinute = 1000000
@@ -52,7 +52,7 @@ func TestAgentMemorySurvivesRealRestart(t *testing.T) {
 	filename := filepath.Join(t.TempDir(), "daemon.json")
 	writeFixtureConfiguration(t, filename, cfg)
 	d := startDaemonFixture(t, filename, fixtureControlToken)
-	record := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems", "create", map[string]string{"launch": "research", "goal": "store"}, 201)
+	record := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems", "create", map[string]string{"name": "research", "goal": "store"}, 201)
 	daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems/"+record.ID+"/start", "start", state.StartSystemCommand{ExpectedRevision: 1}, 202)
 	done := waitSystem(t, d, record.ID, func(s state.SystemRecord) bool { return s.State == "inactive" })
 	if done.Execution.Response != "stored" {
@@ -93,17 +93,17 @@ func TestPausedTimerSurvivesRealRestart(t *testing.T) {
 		}
 		completion(w, "timer handled")
 	})
-	def := cfg.Systems["research"]
+	def := *cfg.Bootstrap
 	def.Tools = []string{"runtime.task.wait"}
 	def.Operator.Tools = def.Tools
-	cfg.Systems["research"] = def
+	cfg.Bootstrap = &def
 	q := cfg.QuotaGroups["account"]
 	q.BurstRequests = 5
 	cfg.QuotaGroups["account"] = q
 	filename := filepath.Join(t.TempDir(), "daemon.json")
 	writeFixtureConfiguration(t, filename, cfg)
 	d := startDaemonFixture(t, filename, fixtureControlToken)
-	record := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems", "create", map[string]string{"launch": "research", "goal": "wait"}, 201)
+	record := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems", "create", map[string]string{"name": "research", "goal": "wait"}, 201)
 	daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems/"+record.ID+"/start", "start", state.StartSystemCommand{ExpectedRevision: 1, LifetimeSeconds: 3600}, 202)
 	waitSystem(t, d, record.ID, func(s state.SystemRecord) bool { return s.Execution.TaskState == "waiting" })
 	daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems/"+record.ID+"/pause", "pause", struct{}{}, 202)

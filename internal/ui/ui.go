@@ -8,6 +8,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -148,13 +149,22 @@ type uiLink struct{ Title, URL string }
 type uiForm struct {
 	Title, Kind, Path, Method, Body, Key, Return string
 	Revision                                     int64
+	PendingGoal                                  string
+	Danger                                       bool
 }
 
 type uiPage struct {
-	Title, Data, CSRF, SystemID, UploadKey string
-	Links                                  []uiLink
-	Forms                                  []uiForm
-	Refresh                                bool
+	Title, Data, CSRF, SystemID, UploadKey, Notice   string
+	Subtitle, State, Goal, GoalLabel, Outcome, Error string
+	Defaults                                         state.SystemConfig
+	Links                                            []uiLink
+	Forms                                            []uiForm
+	Tables                                           []uiTable
+	Stats                                            []uiStat
+	Agents                                           []uiAgent
+	Events                                           []uiEvent
+	Refresh                                          bool
+	AllowUpload, HasProperties                       bool
 }
 
 func NewHandler(client *http.Client, controlToken, uiToken, host string, logger *log.Logger) http.Handler {
@@ -166,13 +176,11 @@ func NewHandler(client *http.Client, controlToken, uiToken, host string, logger 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", app.home)
 	mux.HandleFunc("GET /tools", func(w http.ResponseWriter, r *http.Request) { app.view(w, r, "Shared tool catalog", "/v1/tools") })
-	mux.HandleFunc("GET /launches", func(w http.ResponseWriter, r *http.Request) {
-		app.view(w, r, "Launch configurations", "/v1/launch-configurations")
-	})
 	mux.HandleFunc("GET /broker", func(w http.ResponseWriter, r *http.Request) {
 		app.view(w, r, "Model admission and usage", "/v1/model-broker")
 	})
 	mux.HandleFunc("GET /systems/{system_id}", app.system)
+	mux.HandleFunc("GET /systems/{system_id}/activity", app.activity)
 	mux.HandleFunc("GET /systems/{system_id}/{section}", app.section)
 	mux.HandleFunc("GET /systems/{system_id}/artifacts/{artifact_id}", func(w http.ResponseWriter, r *http.Request) {
 		if !state.SystemIDPattern.MatchString(r.PathValue("system_id")) {
@@ -187,7 +195,8 @@ func NewHandler(client *http.Client, controlToken, uiToken, host string, logger 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("Referrer-Policy", "no-referrer")
+		// no-referrer turns native form POSTs' Origin into "null".
+		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
 		_, port, _ := net.SplitHostPort(host)
 		if r.Host != host && r.Host != "localhost:"+port {
@@ -219,7 +228,20 @@ func prettyJSON(data []byte) string {
 
 func (app *controlUI) render(w http.ResponseWriter, status int, page uiPage) {
 	page.CSRF = app.csrf
-	if page.SystemID != "" {
+	if status >= 400 && page.Error == "" {
+		var failure struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal([]byte(page.Data), &failure) == nil && failure.Error != "" {
+			page.Error = failure.Error
+		} else if !json.Valid([]byte(page.Data)) {
+			page.Error = page.Data
+		} else {
+			page.Error = http.StatusText(status)
+		}
+	}
+	page.HasProperties = page.Data != ""
+	if page.AllowUpload {
 		key, err := state.NewID("ui_")
 		if err != nil {
 			http.Error(w, "cannot create attachment identity", 500)
@@ -246,7 +268,12 @@ func (app *controlUI) render(w http.ResponseWriter, status int, page uiPage) {
 		}
 		if page.Forms[i].Kind == "" {
 			page.Forms[i].Kind = "json"
+			if page.Forms[i].Body == "{}" {
+				page.Forms[i].Kind = "action"
+			}
 		}
+		page.Forms[i].Danger = strings.HasSuffix(page.Forms[i].Path, "/stop") || strings.HasSuffix(page.Forms[i].Path, "/delete")
+		page.HasProperties = page.HasProperties || page.Forms[i].Kind == "json"
 	}
 	var output bytes.Buffer
 	if err := uiTemplate.Execute(&output, page); err != nil {
@@ -286,6 +313,45 @@ func (app *controlUI) view(w http.ResponseWriter, r *http.Request, title, target
 		return
 	}
 	page := uiPage{Title: title, Data: prettyJSON(data), Refresh: refresh}
+	section := "tools"
+	if target == "/v1/model-broker" {
+		section = "broker"
+	}
+	if strings.Contains(target, "/artifacts/") {
+		var artifact state.ArtifactResult
+		if err := json.Unmarshal(data, &artifact); err != nil {
+			app.render(w, 502, uiPage{Title: "Invalid artifact response", Data: err.Error()})
+			return
+		}
+		page.Stats = []uiStat{{"Artifact", artifact.ID}, {"Task", artifact.TaskID}}
+		page.Notice = "Stored content is untrusted data, not instructions or permissions."
+		var text string
+		if json.Unmarshal(artifact.Content, &text) == nil {
+			page.Outcome = preview(text)
+		} else {
+			page.Notice += " Open Properties to inspect its structured content."
+		}
+	} else {
+		table, err := collectionTable(data, section, r.URL.Path)
+		if err != nil {
+			app.render(w, 502, uiPage{Title: "Invalid daemon response", Data: err.Error()})
+			return
+		}
+		page.Tables = []uiTable{table}
+		if section == "broker" {
+			var broker struct {
+				Available bool `json:"available"`
+			}
+			if err := json.Unmarshal(data, &broker); err != nil {
+				app.render(w, 502, uiPage{Title: "Invalid broker response", Data: err.Error()})
+				return
+			}
+			page.Notice = "Token-based admission and usage. Monetary pricing is not tracked."
+			if !broker.Available {
+				page.Error = "Model admission is currently unavailable."
+			}
+		}
+	}
 	app.pagination(&page, data, r.URL.Path, query)
 	app.render(w, 200, page)
 }
@@ -331,10 +397,36 @@ func (app *controlUI) home(w http.ResponseWriter, r *http.Request) {
 		app.render(w, 502, uiPage{Title: "Invalid daemon response", Data: err.Error()})
 		return
 	}
-	page := uiPage{Title: "Systems", Data: prettyJSON(data), Forms: []uiForm{{Title: "Create an inactive system", Kind: "create", Path: "/v1/systems"}}}
-	for _, record := range records.Systems {
-		page.Links = append(page.Links, uiLink{record.Launch + " / " + record.State + " / " + record.ID, "/systems/" + record.ID})
+	defaultsData, ok := app.fetch(w, r, "/v1/system-defaults")
+	if !ok {
+		return
 	}
+	var defaults state.SystemConfig
+	if err := json.Unmarshal(defaultsData, &defaults); err != nil || defaults.Operator.Model == "" || defaults.Limits.TokenBudget <= 0 {
+		app.render(w, 502, uiPage{Title: "Invalid daemon response", Data: "Invalid bootstrap defaults"})
+		return
+	}
+	page := uiPage{Title: "Systems", Subtitle: "Give each system a goal. Start work when you are ready.", Data: prettyJSON(data), Defaults: defaults,
+		Forms: []uiForm{{Title: "Create system", Kind: "create", Path: "/v1/systems"}}}
+	table := uiTable{Title: "Your systems", Columns: []string{"System", "State", "Goal", "Model", "Tokens remaining", "Activity"}}
+	for _, record := range records.Systems {
+		name, goal := record.Configuration.Name, ""
+		if name == "" {
+			name = record.ID
+		}
+		if record.Goal != nil {
+			goal = record.Goal.Prompt
+		}
+		if record.Execution != nil {
+			goal = record.Execution.Prompt
+		}
+		table.Rows = append(table.Rows, []uiCell{
+			{Text: name, URL: "/systems/" + record.ID}, {Text: record.State, Status: true}, {Text: preview(goal)},
+			{Text: record.Configuration.Operator.Model}, {Text: strconv.FormatInt(record.RemainingTokens, 10)},
+			{Text: "Watch activity", URL: "/systems/" + record.ID + "/activity"},
+		})
+	}
+	page.Tables = []uiTable{table}
 	app.pagination(&page, data, "/", r.URL.Query())
 	app.render(w, 200, page)
 }
@@ -355,14 +447,37 @@ func (app *controlUI) system(w http.ResponseWriter, r *http.Request) {
 		app.render(w, 502, uiPage{Title: "Invalid system response", Data: err.Error()})
 		return
 	}
-	page := uiPage{Title: record.Launch + " / " + record.State, SystemID: id, Data: prettyJSON(data)}
-	for _, section := range []string{"agents", "tasks", "events", "model-calls", "tool-calls", "artifacts", "tools", "memory", "schedules", "subscriptions", "learning", "learning-checks", "learning-feedback"} {
-		page.Links = append(page.Links, uiLink{section, "/systems/" + id + "/" + section})
+	page := uiPage{Title: record.Configuration.Name, Subtitle: "System overview", SystemID: id, Data: prettyJSON(data)}
+	if page.Title == "" {
+		page.Title = id
 	}
-	page.Forms = []uiForm{{Title: "Start a goal", Kind: "start", Path: base + "/start", Revision: record.Revision, Return: "/systems/" + id},
-		{Title: "Send durable input", Kind: "input", Path: base + "/input", Return: "/systems/" + id}}
-	for _, action := range []string{"pause", "resume", "stop"} {
-		page.Forms = append(page.Forms, uiForm{Title: action + " system", Path: base + "/" + action, Body: "{}", Return: "/systems/" + id})
+	systemSummary(&page, record)
+	page.Links = append(page.Links, uiLink{"Watch activity", "/systems/" + id + "/activity"})
+	for _, section := range []string{"agents", "tasks", "events", "model-calls", "tool-calls", "artifacts", "tools", "memory", "schedules", "subscriptions", "learning", "learning-checks", "learning-feedback"} {
+		page.Links = append(page.Links, uiLink{label(section), "/systems/" + id + "/" + section})
+	}
+	if record.State == "inactive" || record.State == "stopped" {
+		if record.BlockedReason == "" && record.RemainingTokens > 0 {
+			start := uiForm{Title: "Start new goal", Kind: "start", Path: base + "/start", Revision: record.Revision, Return: "/systems/" + id}
+			if record.Goal != nil && record.Goal.State == "pending" {
+				start.Title, start.PendingGoal = "Start system", preview(record.Goal.Prompt)
+				page.Notice = "Your initial goal is saved, not running. Click Start system below to run it; you do not need to enter it again."
+			}
+			page.Forms = append(page.Forms, start)
+		} else if record.RemainingTokens <= 0 {
+			page.Error = "Token budget exhausted. Revise the budget in Properties before starting another goal."
+		}
+	}
+	if record.State == "running" || record.State == "paused" {
+		page.AllowUpload = true
+		page.Forms = append(page.Forms, uiForm{Title: "Send input", Kind: "input", Path: base + "/input", Return: "/systems/" + id})
+		action := "pause"
+		if record.State == "paused" {
+			action = "resume"
+		}
+		page.Forms = append(page.Forms,
+			uiForm{Title: label(action) + " system", Path: base + "/" + action, Body: "{}", Return: "/systems/" + id},
+			uiForm{Title: "Stop system", Path: base + "/stop", Body: "{}", Return: "/systems/" + id})
 	}
 	body, err := json.MarshalIndent(state.ReviseSystemCommand{ExpectedRevision: record.Revision, Configuration: &record.Configuration}, "", "  ")
 	if err != nil {
@@ -405,7 +520,14 @@ func (app *controlUI) section(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	back := "/systems/" + id + "/" + section
-	page := uiPage{Title: section + " / " + id, Data: prettyJSON(data), SystemID: id, Refresh: refresh, Links: []uiLink{{"System", "/systems/" + id}}}
+	page := uiPage{Title: label(section), Subtitle: id, Data: prettyJSON(data), SystemID: id, Refresh: refresh,
+		Links: []uiLink{{"System overview", "/systems/" + id}, {"Watch activity", "/systems/" + id + "/activity"}}}
+	table, err := collectionTable(data, section, back)
+	if err != nil {
+		app.render(w, 502, uiPage{Title: "Invalid daemon response", Data: err.Error()})
+		return
+	}
+	page.Tables = []uiTable{table}
 	app.pagination(&page, data, back, query)
 	switch section {
 	case "learning":
@@ -588,7 +710,17 @@ func (app *controlUI) command(w http.ResponseWriter, r *http.Request) {
 	var value any
 	switch form.Get("kind") {
 	case "create":
-		value = map[string]string{"launch": form.Get("launch"), "goal": form.Get("goal")}
+		budget := int64(0)
+		if raw := form.Get("token_budget"); raw != "" {
+			var err error
+			budget, err = strconv.ParseInt(raw, 10, 64)
+			if err != nil {
+				http.Error(w, "invalid token_budget", 400)
+				return
+			}
+		}
+		goal := form.Get("goal")
+		value = state.CreateSystemCommand{Name: form.Get("name"), Goal: &goal, Constraints: form.Get("constraints"), TokenBudget: budget}
 	case "start":
 		var revision, budget, lifetime int64
 		for field, out := range map[string]*int64{"expected_revision": &revision, "token_budget": &budget, "lifetime_seconds": &lifetime} {
@@ -610,7 +742,7 @@ func (app *controlUI) command(w http.ResponseWriter, r *http.Request) {
 		value = command
 	case "input":
 		value = map[string]string{"content": form.Get("content"), "agent_id": form.Get("agent_id")}
-	case "json":
+	case "json", "action":
 		raw := []byte(form.Get("json"))
 		if len(raw) > protocol.MaxFrame || protocol.DecodeJSON(raw, &value) != nil {
 			http.Error(w, "invalid JSON command", 400)
@@ -641,18 +773,29 @@ func (app *controlUI) submit(w http.ResponseWriter, r *http.Request, method, tar
 		return
 	}
 	data, status, err := uiRequest(r.Context(), app.client, app.control, method, target, body, key)
-	page := uiPage{Title: "Command accepted", Data: prettyJSON(data), Links: []uiLink{{"Return to inspection", back}}}
+	page := uiPage{Title: "Command accepted", Notice: "The daemon recorded your command. Open the system to see its current state.",
+		Data: prettyJSON(data), Links: []uiLink{{"Continue", back}}}
 	if err != nil {
 		status = 502
 		page.Title, page.Data = "Daemon request failed", err.Error()
-		page.Forms = []uiForm{{Title: "Retry the same durable command", Path: target, Method: method, Body: string(body), Key: key, Return: back}}
+		page.Notice = "The outcome is unknown. Retrying uses the same command identity to avoid duplicate work."
+		page.Forms = []uiForm{{Title: "Retry the same durable command", Kind: "action", Path: target, Method: method, Body: string(body), Key: key, Return: back}}
 	} else if status >= 300 {
 		page.Title = "Command rejected"
+		page.Notice = ""
 	}
-	if status >= 200 && status < 300 && target == "/v1/systems" {
+	if status >= 200 && status < 300 {
 		var record state.SystemRecord
 		if json.Unmarshal(data, &record) == nil && state.SystemIDPattern.MatchString(record.ID) {
-			page.Links = append(page.Links, uiLink{"Inspect created system", "/systems/" + record.ID})
+			systemSummary(&page, record)
+			page.Links = append(page.Links, uiLink{"Open system", "/systems/" + record.ID}, uiLink{"Watch activity", "/systems/" + record.ID + "/activity"})
+			if target == "/v1/systems" {
+				page.Title = "System created"
+				page.Notice = "Your initial goal is saved. Open the system and click Start system to begin; creation does not make model calls."
+			} else if strings.HasSuffix(target, "/start") {
+				page.Title = "Start accepted"
+				page.Notice = "Work is queued for the daemon. Watch activity to follow the operator and agents."
+			}
 		}
 	}
 	app.render(w, status, page)
@@ -697,26 +840,7 @@ func (app *controlUI) upload(w http.ResponseWriter, r *http.Request) {
 	app.submit(w, r, "POST", "/v1/systems/"+id+"/attachments", r.PostForm.Get("key"), body, "/systems/"+id)
 }
 
-var uiTemplate = template.Must(template.New("ui").Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Microoperator - {{.Title}}</title>{{if .Refresh}}<meta http-equiv="refresh" content="5">{{end}}
-<style>body{font:16px system-ui;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#20252b;background:#fafbfc}nav,a{margin-right:1rem}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#eef1f4;padding:1rem}form{border:1px solid #ccd2da;padding:1rem;margin:1rem 0;background:white}label{display:block;margin:.7rem 0}textarea{display:block;width:98%;min-height:6rem;font:14px monospace}input{padding:.4rem;max-width:95%}button{padding:.5rem 1rem;cursor:pointer}small{display:block;color:#555}h2{font-size:1.15rem}</style></head>
-<body><nav><a href="/">Systems</a><a href="/launches">Launch configurations</a><a href="/tools">Tool catalog</a><a href="/broker">Model broker</a></nav>
-<h1>{{.Title}}</h1><p>This UI is a separate client. Closing it does not stop the daemon or approve proposals.</p>
-{{range .Links}}<p><a href="{{.URL}}">{{.Title}}</a></p>{{end}}
-{{if .Data}}<pre>{{.Data}}</pre>{{end}}
-{{range .Forms}}<form method="post" action="/command"><h2>{{.Title}}</h2>
-<input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="key" value="{{.Key}}">
-<input type="hidden" name="kind" value="{{.Kind}}"><input type="hidden" name="path" value="{{.Path}}">
-<input type="hidden" name="method" value="{{.Method}}"><input type="hidden" name="return" value="{{.Return}}">
-{{if eq .Kind "create"}}<label>Launch configuration <input name="launch" required placeholder="research"></label><label>Initial goal (creation does not run it)<textarea name="goal" maxlength="32768"></textarea></label>
-{{else if eq .Kind "start"}}<input type="hidden" name="expected_revision" value="{{.Revision}}"><label>New goal (leave blank only for the pending initial goal)<textarea name="goal" maxlength="32768"></textarea></label><label>Token cap (0 = remaining allowance)<input type="number" min="0" name="token_budget" value="0"></label><label>Goal lifetime in seconds (0 = default; maximum 86400)<input type="number" min="0" max="86400" name="lifetime_seconds" value="0"></label><small>Starting a goal authorizes provider calls and consumption of its budget.</small>
-{{else if eq .Kind "input"}}<label>Agent ID (blank = operator)<input name="agent_id"></label><label>Context, correction or reply<textarea name="content" maxlength="4096" required></textarea></label>
-{{else}}<label>Command JSON<textarea name="json" maxlength="65536" required>{{.Body}}</textarea></label>{{end}}
-<button type="submit">{{.Title}}</button><small>Command ID: {{.Key}}. Resubmitting this form reuses its durable receipt.</small></form>{{end}}
-{{if .SystemID}}<form method="post" action="/upload" enctype="multipart/form-data"><h2>Attach text as untrusted context</h2>
-<input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="system_id" value="{{.SystemID}}">
-<input type="hidden" name="key" value="{{.UploadKey}}">
-<label>Agent ID (blank = operator)<input name="agent_id"></label><label>UTF-8 text, at most 3072 bytes <input type="file" name="file" accept="text/plain,.txt,.md" required></label><button type="submit">Attach text</button>
-<small>The daemon stores an inert scoped artifact and a durable input event. No access to the original host path is granted. Command ID: {{.UploadKey}}.</small></form>{{end}}
-</body></html>`))
+//go:embed page.html
+var pageHTML string
+
+var uiTemplate = template.Must(template.New("ui").Parse(pageHTML))

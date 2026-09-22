@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"unicode/utf8"
 )
 
 type ListAgentsResult struct {
@@ -225,6 +226,15 @@ func (store *Store) Artifact(ctx context.Context, systemID string, artifactID st
 	}
 	if err != nil {
 		return result, err
+	}
+	if !json.Valid(content) {
+		if !utf8.Valid(content) {
+			return result, Invalid("artifact", "content is not UTF-8 text or JSON")
+		}
+		content, err = json.Marshal(string(content))
+		if err != nil {
+			return result, err
+		}
 	}
 	return ArtifactResult{artifactID, taskID, digest, content}, nil
 }

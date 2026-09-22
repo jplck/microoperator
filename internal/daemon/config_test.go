@@ -42,14 +42,17 @@ func fixtureConfiguration(t *testing.T) state.Configuration {
 		Tools: map[string]state.ToolConfig{
 			"shared.notes": {Kind: "skill", Version: 1, Description: "Fixture guidance", Content: "Use sources, not guesses.", RequiresTools: []string{}},
 		},
-		Systems: map[string]state.SystemConfig{
-			"research": {
-				Tools:    []string{"shared.notes"},
-				Operator: state.OperatorConfig{Prompt: "Research $HOME literally.", Model: "default", Tools: []string{"shared.notes"}, SandboxProfile: "worker"},
-				Limits:   state.SystemLimits{MaxAgents: 4, MaxActiveAgents: 2, TokenBudget: 50000},
-			},
+		Bootstrap: &state.SystemConfig{
+			Tools:    []string{"shared.notes"},
+			Operator: state.OperatorConfig{Prompt: "Research $HOME literally.", Model: "default", Tools: []string{"shared.notes"}, SandboxProfile: "worker"},
+			Limits:   state.SystemLimits{MaxAgents: 4, MaxActiveAgents: 2, TokenBudget: 50000},
 		},
 	}
+}
+
+func fixtureGoal() *string {
+	goal := "fixture goal"
+	return &goal
 }
 
 func fixtureLookup(name string) (string, bool) {
@@ -64,6 +67,35 @@ func writeFixtureConfiguration(t *testing.T, filename string, cfg state.Configur
 	}
 	if err := os.WriteFile(filename, data, 0600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSampleConfigurationLoadsWithoutProviderCredentials(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "microoperator.example.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	filename := filepath.Join(root, "microoperator.json")
+	if err := os.WriteFile(filename, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfiguration(filename, func(string) (string, bool) {
+		t.Fatal("sample configuration requires provider credentials")
+		return "", false
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DataDir != filepath.Join(root, "state") || len(cfg.Providers) != 1 ||
+		cfg.Providers["local"].Adapter != "ollama" || cfg.Providers["local"].BaseURL != "http://127.0.0.1:11434/v1" ||
+		cfg.Models["default"].Model != "qwen3.8:27b" {
+		t.Fatal("sample does not use the documented local defaults")
+	}
+	system, err := cfg.BootstrapSystem()
+	if err != nil || system.Operator.Model != "default" || len(system.Operator.Tools) < 10 ||
+		system.Limits.MaxAgents != 8 || system.Limits.MaxActiveAgents != 2 || cfg.Learning != nil {
+		t.Fatal("sample does not enable bounded general-purpose bootstrap")
 	}
 }
 
@@ -88,6 +120,42 @@ func TestReadmeConfiguration(t *testing.T) {
 		return fixtureProviderSecret, name == "MICROOPERATOR_LLM_KEY"
 	}); err != nil {
 		t.Fatalf("README configuration is not accepted: %v", err)
+	}
+}
+
+func TestReadmeOllamaAndAzureConfiguration(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, section, found := strings.Cut(string(data), "### Ollama and Azure\n")
+	if !found {
+		t.Fatal("README has no provider setup")
+	}
+	_, example, found := strings.Cut(section, "```json\n")
+	if !found {
+		t.Fatal("README has no provider configuration example")
+	}
+	example, _, found = strings.Cut(example, "```")
+	if !found {
+		t.Fatal("README provider example is unterminated")
+	}
+	var providers state.Configuration
+	if err := protocol.DecodeJSON([]byte(example), &providers); err != nil {
+		t.Fatal(err)
+	}
+	cfg := fixtureConfiguration(t)
+	cfg.Providers, cfg.Models, cfg.QuotaGroups = providers.Providers, providers.Models, providers.QuotaGroups
+	for _, model := range []string{"default", "azure"} {
+		system := *cfg.Bootstrap
+		system.Operator.Model = model
+		cfg.Bootstrap = &system
+		if err := cfg.Validate(func(string) (string, bool) {
+			t.Fatal("README keyless provider example required an API key")
+			return "", false
+		}); err != nil {
+			t.Fatalf("README provider example for %s: %v", model, err)
+		}
 	}
 }
 
@@ -185,9 +253,9 @@ func TestConfigurationValidation(t *testing.T) {
 			c.Tools["shared.notes"] = tool
 		}, "kind"},
 		{"unimplemented built-in", func(c *state.Configuration) {
-			s := c.Systems["research"]
+			s := *c.Bootstrap
 			s.Tools = []string{"runtime.agent.propose"}
-			c.Systems["research"] = s
+			c.Bootstrap = &s
 		}, "tools"},
 		{"dependency cycle", func(c *state.Configuration) {
 			tool := c.Tools["shared.notes"]
@@ -195,9 +263,9 @@ func TestConfigurationValidation(t *testing.T) {
 			c.Tools["shared.notes"] = tool
 		}, "tools"},
 		{"operator escalation", func(c *state.Configuration) {
-			s := c.Systems["research"]
+			s := *c.Bootstrap
 			s.Tools = nil
-			c.Systems["research"] = s
+			c.Bootstrap = &s
 		}, "operator.tools"},
 		{"ungranted dependency", func(c *state.Configuration) {
 			c.Tools["shared.other"] = state.ToolConfig{Kind: "skill", Version: 1, Description: "Dependency", Content: "Fixture"}
@@ -206,29 +274,29 @@ func TestConfigurationValidation(t *testing.T) {
 			c.Tools["shared.notes"] = tool
 		}, "tools"},
 		{"unknown model", func(c *state.Configuration) {
-			s := c.Systems["research"]
+			s := *c.Bootstrap
 			s.Operator.Model = "missing"
-			c.Systems["research"] = s
+			c.Bootstrap = &s
 		}, "operator.model"},
 		{"unknown profile", func(c *state.Configuration) {
-			s := c.Systems["research"]
+			s := *c.Bootstrap
 			s.Operator.SandboxProfile = "missing"
-			c.Systems["research"] = s
+			c.Bootstrap = &s
 		}, "sandbox_profile"},
-		{"empty prompt", func(c *state.Configuration) {
-			s := c.Systems["research"]
-			s.Operator.Prompt = ""
-			c.Systems["research"] = s
+		{"blank prompt", func(c *state.Configuration) {
+			s := *c.Bootstrap
+			s.Operator.Prompt = " "
+			c.Bootstrap = &s
 		}, "prompt"},
 		{"excess activations", func(c *state.Configuration) {
-			s := c.Systems["research"]
+			s := *c.Bootstrap
 			s.Limits.MaxActiveAgents = 5
-			c.Systems["research"] = s
+			c.Bootstrap = &s
 		}, "limits"},
 		{"empty budget", func(c *state.Configuration) {
-			s := c.Systems["research"]
+			s := *c.Bootstrap
 			s.Limits.TokenBudget = 0
-			c.Systems["research"] = s
+			c.Bootstrap = &s
 		}, "token_budget"},
 	}
 	for _, tc := range cases {
@@ -263,7 +331,7 @@ func TestConfigurationJSONAndOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	if loaded.DataDir != filepath.Join(filepath.Dir(filename), "state") ||
-		loaded.Systems["research"].Operator.Prompt != cfg.Systems["research"].Operator.Prompt {
+		loaded.Bootstrap.Operator.Prompt != cfg.Bootstrap.Operator.Prompt {
 		t.Fatal("paths were not relative to configuration, or prompt was expanded")
 	}
 	for _, data := range []string{

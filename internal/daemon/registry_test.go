@@ -17,10 +17,10 @@ import (
 
 func teamConfiguration(t *testing.T) state.Configuration {
 	cfg := fixtureConfiguration(t)
-	def := cfg.Systems["research"]
+	def := *cfg.Bootstrap
 	def.Tools = []string{"runtime.agent.propose", "runtime.agent.list", "runtime.task.delegate", "runtime.task.progress", "runtime.tool.propose", "runtime.text.analyze"}
 	def.Operator.Tools = append([]string{}, def.Tools...)
-	cfg.Systems["research"] = def
+	cfg.Bootstrap = &def
 	q := cfg.QuotaGroups["account"]
 	q.BurstRequests, q.RequestsPerMinute, q.TokensPerMinute = 60, 600, 1000000
 	cfg.QuotaGroups["account"] = q
@@ -81,7 +81,7 @@ func TestRegistryScopeDraftsAndRevocation(t *testing.T) {
 	cfg := teamConfiguration(t)
 	engine, id := fixtureTeamEngine(t, cfg)
 	first := fixtureCall(t, engine.broker, id, "first", false)
-	second, err := engine.store.CreateSystem(context.Background(), localAdministrator, "second", state.CreateSystemCommand{Launch: "research"}, cfg, id)
+	second, err := engine.store.CreateSystem(context.Background(), localAdministrator, "second", state.CreateSystemCommand{Name: "research", Goal: fixtureGoal()}, cfg, id)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -57,18 +57,18 @@ func TestAgentProposesAndWaitsForProtectedEvaluation(t *testing.T) {
 			t.Errorf("unexpected learning continuation: %+v", request.Messages)
 		}
 	})
-	def := cfg.Systems["research"]
+	def := *cfg.Bootstrap
 	def.Tools = []string{"runtime.tool.propose", "runtime.learning.evaluate"}
 	def.Operator.Tools = def.Tools
 	def.Limits.MaxActiveAgents = 1
-	cfg.Systems["research"] = def
+	cfg.Bootstrap = &def
 	q := cfg.QuotaGroups["account"]
 	q.BurstRequests = 20
 	cfg.QuotaGroups["account"] = q
 	filename := filepath.Join(t.TempDir(), "daemon.json")
 	writeFixtureConfiguration(t, filename, cfg)
 	d := startDaemonFixture(t, filename, fixtureControlToken)
-	system := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems", "create", map[string]string{"launch": "research"}, 201)
+	system := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems", "create", map[string]string{"name": "research", "goal": "fixture goal"}, 201)
 	base := "/v1/systems/" + system.ID
 	check := daemonSystem(t, d, fixtureControlToken, "POST", base+"/learning/checks", "checks", map[string]any{"cases": []state.ProtectedCase{{Input: "protected", Expected: "correct"}}}, 201)
 	protectedID.Store(learningResult(t, check, "check_id"))
@@ -171,18 +171,18 @@ func TestProtectedSkillLearningApprovalReuseAndLimits(t *testing.T) {
 			completion(w, "baseline")
 		}
 	})
-	def := cfg.Systems["research"]
+	def := *cfg.Bootstrap
 	def.Tools = []string{"runtime.task.wait"}
 	def.Operator.Tools = def.Tools
 	def.Limits.MaxActiveAgents = 1
-	cfg.Systems["research"] = def
+	cfg.Bootstrap = &def
 	q := cfg.QuotaGroups["account"]
 	q.BurstRequests = 20
 	cfg.QuotaGroups["account"] = q
 	filename := filepath.Join(t.TempDir(), "daemon.json")
 	writeFixtureConfiguration(t, filename, cfg)
 	d := startDaemonFixture(t, filename, fixtureControlToken)
-	system := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems", "create", map[string]string{"launch": "research", "goal": "wait for review"}, 201)
+	system := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems", "create", map[string]string{"name": "research", "goal": "wait for review"}, 201)
 	base := "/v1/systems/" + system.ID
 	daemonSystem(t, d, fixtureControlToken, "POST", base+"/start", "start", state.StartSystemCommand{ExpectedRevision: 1, LifetimeSeconds: 3600}, 202)
 	waiting := waitSystem(t, d, system.ID, func(s state.SystemRecord) bool { return s.Execution.TaskState == "waiting" })
@@ -261,7 +261,7 @@ func TestProtectedSkillLearningApprovalReuseAndLimits(t *testing.T) {
 	system = daemonSystem(t, d, fixtureControlToken, "PUT", base+"/configuration", "assign", revision, 200)
 	d.stop(t, false)
 	d = startDaemonFixture(t, filename, fixtureControlToken)
-	other := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems", "other", map[string]string{"launch": "research"}, 201)
+	other := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems", "other", map[string]string{"name": "research", "goal": "fixture goal"}, 201)
 	if status, _ := daemonRequest(t, d, fixtureControlToken, "PUT", "/v1/systems/"+other.ID+"/configuration", "cross", revision); status != 400 {
 		t.Fatal("private learning artifact crossed systems")
 	}

@@ -63,7 +63,7 @@ func TestPausedInputSurvivesRealDaemonRestart(t *testing.T) {
 	filename := filepath.Join(t.TempDir(), "daemon.json")
 	writeFixtureConfiguration(t, filename, cfg)
 	d := startDaemonFixture(t, filename, fixtureControlToken)
-	record := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems", "create", map[string]string{"launch": "research", "goal": "initial goal"}, 201)
+	record := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems", "create", map[string]string{"name": "research", "goal": "initial goal"}, 201)
 	daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems/"+record.ID+"/start", "start", state.StartSystemCommand{ExpectedRevision: 1}, 202)
 	select {
 	case <-entered:
@@ -134,24 +134,28 @@ func TestSharedToolAndSkillRequireSystemGrant(t *testing.T) {
 		functionCompletion(w, "runtime.text.analyze", "analyze", state.TextArguments{Text: "reviewed tool", Save: true})
 	})
 	cfg.Tools["shared.instructions"] = state.ToolConfig{Kind: "skill", Version: 1, Description: "Pinned instructions", Content: "read-only skill", RequiresTools: []string{"runtime.text.analyze"}}
-	granted := cfg.Systems["research"]
+	granted := *cfg.Bootstrap
 	granted.Tools = []string{"runtime.text.analyze", "shared.instructions"}
 	granted.Operator.Tools = granted.Tools
-	cfg.Systems["research"] = granted
+	cfg.Bootstrap = &granted
 	denied := granted
 	denied.Tools = []string{}
 	denied.Operator.Tools = []string{}
 	denied.Operator.Prompt = "denied"
-	cfg.Systems["denied"] = denied
 	q := cfg.QuotaGroups["account"]
 	q.BurstRequests = 10
 	cfg.QuotaGroups["account"] = q
 	filename := filepath.Join(t.TempDir(), "daemon.json")
 	writeFixtureConfiguration(t, filename, cfg)
 	d := startDaemonFixture(t, filename, fixtureControlToken)
-	for _, launch := range []string{"research", "denied"} {
-		record := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems", "create-"+launch, map[string]string{"launch": launch, "goal": "analyze"}, 201)
-		daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems/"+record.ID+"/start", "start-"+launch, state.StartSystemCommand{ExpectedRevision: 1}, 202)
+	for _, name := range []string{"research", "denied"} {
+		record := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems", "create-"+name, map[string]string{"name": name, "goal": "analyze"}, 201)
+		if name == "denied" {
+			denied.Name = name
+			record = daemonSystem(t, d, fixtureControlToken, "PUT", "/v1/systems/"+record.ID+"/configuration", "deny",
+				state.ReviseSystemCommand{ExpectedRevision: 1, Configuration: &denied}, 200)
+		}
+		daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems/"+record.ID+"/start", "start-"+name, state.StartSystemCommand{ExpectedRevision: record.Revision}, 202)
 		done := waitSystem(t, d, record.ID, func(s state.SystemRecord) bool { return s.State == "inactive" })
 		_, data := daemonRequest(t, d, fixtureControlToken, "GET", "/v1/systems/"+record.ID+"/artifacts", "", nil)
 		var artifacts struct {
@@ -160,7 +164,7 @@ func TestSharedToolAndSkillRequireSystemGrant(t *testing.T) {
 		if err := json.Unmarshal(data, &artifacts); err != nil {
 			t.Fatal(err)
 		}
-		if launch == "research" {
+		if name == "research" {
 			if done.Execution.Response != "granted tool finished" || len(artifacts.Artifacts) != 1 {
 				t.Fatalf("granted execution failed: %+v %s", done.Execution, data)
 			}
@@ -210,15 +214,14 @@ func TestGoalStopCancelsWaitingTeamButNotOtherSystem(t *testing.T) {
 			functionCompletion(w, "runtime.task.delegate", "delegate", state.DelegateArgs{AgentID: child.ID, Prompt: "wait"})
 		}
 	})
-	def := cfg.Systems["research"]
+	def := *cfg.Bootstrap
 	def.Tools = []string{"runtime.agent.propose", "runtime.task.delegate"}
 	def.Operator.Tools = def.Tools
 	def.Operator.Prompt = "operator"
 	def.Limits.MaxActiveAgents = 1
-	cfg.Systems["research"] = def
+	cfg.Bootstrap = &def
 	other := def
 	other.Operator.Prompt = "independent"
-	cfg.Systems["independent"] = other
 	q := cfg.QuotaGroups["account"]
 	q.BurstRequests = 10
 	q.MaxConcurrent = 2
@@ -226,15 +229,18 @@ func TestGoalStopCancelsWaitingTeamButNotOtherSystem(t *testing.T) {
 	filename := filepath.Join(t.TempDir(), "daemon.json")
 	writeFixtureConfiguration(t, filename, cfg)
 	d := startDaemonFixture(t, filename, fixtureControlToken)
-	record := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems", "team", map[string]string{"launch": "research", "goal": "delegate"}, 201)
+	record := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems", "team", map[string]string{"name": "research", "goal": "delegate"}, 201)
 	started := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems/"+record.ID+"/start", "start", state.StartSystemCommand{ExpectedRevision: 1}, 202)
 	select {
 	case <-childEntered:
 	case <-time.After(10 * time.Second):
 		t.Fatal("child not dispatched")
 	}
-	second := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems", "other", map[string]string{"launch": "independent", "goal": "finish"}, 201)
-	daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems/"+second.ID+"/start", "other-start", state.StartSystemCommand{ExpectedRevision: 1}, 202)
+	second := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems", "other", map[string]string{"name": "independent", "goal": "finish"}, 201)
+	other.Name = "independent"
+	second = daemonSystem(t, d, fixtureControlToken, "PUT", "/v1/systems/"+second.ID+"/configuration", "other-config",
+		state.ReviseSystemCommand{ExpectedRevision: 1, Configuration: &other}, 200)
+	daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems/"+second.ID+"/start", "other-start", state.StartSystemCommand{ExpectedRevision: second.Revision}, 202)
 	stopping := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems/"+record.ID+"/goals/"+started.Execution.GoalID+"/stop", "stop", struct{}{}, 202)
 	if stopping.State != "stopping" {
 		t.Fatalf("goal stop did not wait for cleanup: %s", stopping.State)
@@ -332,12 +338,12 @@ func TestTwoSystemsDelegateThroughDurableMailboxes(t *testing.T) {
 			w.WriteHeader(400)
 		}
 	})
-	def := cfg.Systems["research"]
+	def := *cfg.Bootstrap
 	def.Tools = []string{"runtime.agent.propose", "runtime.task.delegate", "runtime.text.analyze"}
 	def.Operator.Tools = append([]string{}, def.Tools...)
 	def.Operator.Prompt = "operator"
 	def.Limits.MaxActiveAgents = 1
-	cfg.Systems["research"] = def
+	cfg.Bootstrap = &def
 	q := cfg.QuotaGroups["account"]
 	q.BurstRequests, q.RequestsPerMinute, q.TokensPerMinute = 20, 600, 1000000
 	cfg.QuotaGroups["account"] = q
@@ -346,7 +352,7 @@ func TestTwoSystemsDelegateThroughDurableMailboxes(t *testing.T) {
 	d := startDaemonFixture(t, filename, fixtureControlToken)
 	records := map[string]state.SystemRecord{}
 	for _, name := range []string{"alpha", "beta"} {
-		record := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems", "create-"+name, map[string]string{"launch": "research", "goal": name}, 201)
+		record := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems", "create-"+name, map[string]string{"name": "research", "goal": name}, 201)
 		records[name] = record
 		daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems/"+record.ID+"/start", "start-"+name, state.StartSystemCommand{ExpectedRevision: 1}, 202)
 	}

@@ -109,7 +109,7 @@ func TestLearningApprovalRejectsChangedConfiguration(t *testing.T) {
 	if _, err := engine.store.Control(ctx, engine.cfg, "stop", call.SystemID, "system", "stop", call.SystemID); err != nil {
 		t.Fatal(err)
 	}
-	def := engine.cfg.Systems["research"]
+	def := *engine.cfg.Bootstrap
 	def.Operator.Prompt = "Changed baseline"
 	if _, err := engine.store.ReviseSystem(ctx, localAdministrator, "revise", call.SystemID, ReviseSystemCommand{ExpectedRevision: 1, Configuration: &def}, engine.cfg, configID); err != nil {
 		t.Fatal(err)

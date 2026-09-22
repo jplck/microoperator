@@ -18,11 +18,49 @@ Sandbox profiles have been exercised on Linux/amd64 WSL2; other Linux
 architectures are rejected until separately verified. The pinned `nono-go`
 binding and its Linux native library remain required for sandbox enforcement.
 
+### Quick start with local defaults
+
+[microoperator.example.json](microoperator.example.json) is a complete configuration
+with no placeholders or provider credentials. It uses Ollama at
+`http://127.0.0.1:11434/v1`, `qwen3.8:27b` (Q4_K_M, about 18 GB), one active model
+call, and a 100,000-token system budget. Each new system starts with a general-purpose
+operator, scoped memory/artifacts, and bounded delegation/proposal capabilities.
+Generated-code execution still requires additional setup and human approval.
+
+Install Ollama 0.32.12 or newer first. If its service is not running, leave `ollama serve` running
+in another terminal. Then, from the repository root:
+
+```sh
+ollama pull qwen3.8:27b
+cp -n microoperator.example.json microoperator.json
+chmod 600 microoperator.json
+export MICROOPERATOR_CONTROL_TOKEN="$(openssl rand -hex 32)"
+printf 'Control token for the UI shell: %s\n' "$MICROOPERATOR_CONTROL_TOKEN"
+CGO_ENABLED=1 go run . daemon --config ./microoperator.json
+```
+
+`cp -n` preserves an existing `microoperator.json`; if one already exists, merge
+the sample settings into it deliberately. The private copy is necessary because
+the daemon rejects group/world-readable configuration files. Start the
+[detached UI](#detached-browser-ui) with the same control token, enter a system
+name and goal, then explicitly start it. Nothing starts a goal automatically.
+Use [Ollama and Azure](#ollama-and-azure) to change models or add your Azure resource;
+Azure is not a default because its endpoint and deployment are account-specific.
+
+If you run `./microoperator` instead of `go run .`, rebuild it after source updates.
+An older executable can reject newer configuration fields such as `bootstrap`:
+
+```sh
+CGO_ENABLED=1 go build -o ./microoperator .
+./microoperator daemon --config ./microoperator.json
+```
+
 ### Daemon
 
 The daemon supports explicit goals and OpenAI-compatible Chat Completions.
 Loading configuration and creating systems still do not start workers or make
-provider calls. Create a user-owned `microoperator.json`:
+provider calls. The sample above is the local default. For an API-key-based
+provider instead, create a user-owned `microoperator.json`:
 
 ```json
 {
@@ -62,20 +100,15 @@ provider calls. Create a user-owned `microoperator.json`:
     }
   },
   "tools": {},
-  "systems": {
-    "research": {
-      "tools": [],
-      "operator": {
-        "prompt": "Research the supplied goal.",
-        "model": "default",
-        "tools": [],
-        "sandbox_profile": "worker"
-      },
-      "limits": {
-        "max_agents": 4,
-        "max_active_agents": 2,
-        "token_budget": 50000
-      }
+  "bootstrap": {
+    "operator": {
+      "model": "default",
+      "sandbox_profile": "worker"
+    },
+    "limits": {
+      "max_agents": 8,
+      "max_active_agents": 2,
+      "token_budget": 100000
     }
   }
 }
@@ -94,8 +127,9 @@ provider call. Credentials are environment variables, never JSON values or URL p
 The control token must contain 32-256 printable, non-space characters.
 
 Readiness is one JSON line with `type: "ready"` and `data` containing the absolute
-control-socket path. Invalid configuration or missing declared credentials prevents
-readiness. SIGINT/SIGTERM cancels active operators, shuts down the server, and closes
+control-socket path. Invalid configuration or missing declared API-key credentials
+prevents readiness. Azure credentials are acquired on admitted calls, not startup.
+SIGINT/SIGTERM cancels active operators, shuts down the server, and closes
 the database. Interrupted calls keep conservative accounting.
 
 `data_dir` is relative to the configuration file, not the invoking shell. It must
@@ -104,6 +138,126 @@ The daemon refuses symlinked configuration/state files, unsafe file permissions,
 an unrelated/newer database, or a second daemon using the same directory. After
 a crash, it recovers committed SQLite state and removes only the stale socket.
 The default local configuration and state directory are ignored by Git.
+
+### Ollama and Azure
+
+Three explicit adapters share the same broker, quotas, budgets, response validation,
+and tool-call handling:
+
+| Adapter | Endpoint | Authentication |
+| --- | --- | --- |
+| `openai-chat-completions` | OpenAI-compatible base URL | Required `api_key_env`, sent as a Bearer token |
+| `ollama` | Loopback URL ending in `/v1`, normally `http://127.0.0.1:11434/v1` | None; omit `api_key_env` |
+| `azure-openai` | HTTPS URL ending in `/openai/v1` | Azure SDK `DefaultAzureCredential`; omit `api_key_env` |
+
+For both local Ollama and Azure models, replace the example's `providers`,
+`models`, and `quota_groups` sections with the following. Keep the other sections.
+The bootstrap operator uses `default`, which now selects Ollama:
+
+```json
+{
+  "providers": {
+    "local": {
+      "adapter": "ollama",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "timeout_seconds": 600
+    },
+    "azure": {
+      "adapter": "azure-openai",
+      "base_url": "https://YOUR-RESOURCE.openai.azure.com/openai/v1"
+    }
+  },
+  "models": {
+    "default": {
+      "provider": "local",
+      "model": "qwen3:8b",
+      "quota_groups": ["local"],
+      "max_output_tokens": 1024
+    },
+    "azure": {
+      "provider": "azure",
+      "model": "YOUR-DEPLOYMENT-NAME",
+      "quota_groups": ["azure"],
+      "max_output_tokens": 1024
+    }
+  },
+  "quota_groups": {
+    "local": {
+      "requests_per_minute": 60,
+      "tokens_per_minute": 60000,
+      "burst_requests": 1,
+      "max_concurrent": 1,
+      "queue_capacity": 100,
+      "max_wait_seconds": 30
+    },
+    "azure": {
+      "requests_per_minute": 60,
+      "tokens_per_minute": 60000,
+      "burst_requests": 1,
+      "max_concurrent": 2,
+      "queue_capacity": 100,
+      "max_wait_seconds": 30
+    }
+  }
+}
+```
+
+These quota values are examples, not Azure quota guarantees. Keep aliases sharing
+an Azure deployment/account in the same applicable quota groups. Local inference
+still consumes configured token budgets.
+
+Each provider accepts `timeout_seconds`: 1-3600 seconds, with omitted/zero meaning
+60 seconds. This bounds credential acquisition and the entire request, including
+response headers, body, and streaming. The Ollama sample allows 600 seconds for
+large local models, including loading and inference; this is not a speed guarantee.
+The original goal deadline can end a request sooner. Changing this administrative
+setting requires restarting the daemon and creating or explicitly revising a system
+to bind the new definitions. It does not replay or refund earlier timed-out calls.
+
+Install Ollama and start its server with `ollama serve` in a separate terminal,
+unless it is already running as a service. Pull a local model with
+`ollama pull qwen3:8b`, or substitute another installed model name in configuration.
+No dummy API key is needed. Choose a local model, not an Ollama cloud-model tag,
+if inference must stay on this machine.
+
+For Azure, deploy a Chat Completions-compatible model and use its **deployment
+name**, not its catalog model ID. Both `RESOURCE.openai.azure.com/openai/v1` and
+`RESOURCE.services.ai.azure.com/openai/v1` HTTPS endpoints work. The old
+deployment URLs with `api-version` are not this adapter's protocol.
+Your identity needs the **Cognitive Services OpenAI User** role on the resource.
+In the daemon's Linux environment:
+
+```sh
+az login
+# Optional when more than one subscription is available:
+az account set --subscription YOUR-SUBSCRIPTION-ID
+# Optional: use exactly the identity logged in through az login.
+export AZURE_TOKEN_CREDENTIALS=AzureCLICredential
+```
+
+Without that selector, the SDK's normal `DefaultAzureCredential` chain applies,
+including environment/workload/managed identity credentials before developer
+credentials. This is the local-development login path; constrain credentials
+explicitly for unattended deployments. Azure CLI must be installed and available
+on the daemon's `PATH` when using CLI authentication.
+
+Set `systems.research.operator.model` to `azure` to select Azure instead of Ollama.
+Rebuild the executable and restart the daemon after editing configuration. Create
+a new system, or explicitly revise an inactive existing system to bind the changed
+definitions. The daemon/UI commands and their control/UI tokens are unchanged;
+`MICROOPERATOR_LLM_KEY` is unnecessary when only these two providers are configured.
+
+Azure requests use `max_completion_tokens`; the other adapters use `max_tokens`.
+The selected model must support requested tools/streaming and return valid usage.
+Azure access tokens are requested per admitted attempt for
+`https://ai.azure.com/.default`, within the provider deadline, and are never written
+to configuration, SQLite, artifacts, or worker IPC. Authentication failures before
+HTTP dispatch fail visibly and release goal/system reservations without a model
+call; rate admission remains conservative. Errors from the SDK/CLI are sanitized.
+There is no fallback to a different provider or unauthenticated Azure request.
+
+Protocol references: [Ollama OpenAI compatibility](https://docs.ollama.com/api/openai-compatibility)
+and [Azure OpenAI v1](https://learn.microsoft.com/azure/foundry/openai/api-version-lifecycle).
 
 ### Control API
 
@@ -120,13 +274,13 @@ From a client shell with the same control token exported:
 ```sh
 curl --unix-socket ./state/control.sock \
   -H "Authorization: Bearer $MICROOPERATOR_CONTROL_TOKEN" \
-  http://localhost/v1/launch-configurations
+  http://localhost/v1/system-defaults
 
 curl --unix-socket ./state/control.sock \
   -H "Authorization: Bearer $MICROOPERATOR_CONTROL_TOKEN" \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: research-1' \
-  -d '{"launch":"research","goal":"Record this goal without executing it."}' \
+  -d '{"name":"Research","goal":"Record this goal without executing it."}' \
   http://localhost/v1/systems
 
 curl --unix-socket ./state/control.sock \
@@ -135,8 +289,30 @@ curl --unix-socket ./state/control.sock \
 ```
 
 Reusing `research-1` with the same command returns its saved result. A different
-key, such as `research-2`, creates a separate instance from the same launch
-configuration. Reusing a key with a different command returns 409.
+key, such as `research-2`, creates a separate named system. Reusing a key with a
+different command returns 409. Names need not be unique; system IDs are identities.
+
+Creation requires `name` and `goal`; optional `constraints` guide the operator,
+and `token_budget` may reduce, never exceed, the configured default (0 uses it).
+Names are 1-128 UTF-8 bytes with no control characters or surrounding whitespace.
+Constraints are at most 4096 bytes and persist in every agent's model context.
+They are guidance, not enforceable grants: network, tools, budgets and approval
+rules are enforced separately by the daemon.
+
+`bootstrap` is optional administrative startup defaults, not a domain template.
+Without it, the model/profile aliases are `default`/`worker`, agent limits are
+8 total/2 active, and the system budget is 100,000 tokens. The generic operator
+discovers capabilities, plans, delegates narrowly, proposes missing tools and
+requires evidence before claiming success. Administrators can override bootstrap
+operator settings and limits or supply explicit tool lists; omitted lists use the
+generic capabilities, while `[]` grants no tools. Supplied limits must be complete.
+No domain prompt, simulator or trading strategy is required to create a system.
+It must request human input when a needed capability cannot yet be used.
+
+**Configuration/API change:** the old `systems` map, `launch` creation field and
+`/v1/launch-configurations` endpoint have been removed. Replace the map in your
+private config with the sample's optional `bootstrap` settings, then restart.
+The application does not erase existing on-disk runtime data.
 
 To revise an instance, set `SYSTEM_ID` to its returned `system_id`. Submit the full
 future configuration and the revision number you inspected:
@@ -150,6 +326,7 @@ curl --unix-socket ./state/control.sock \
   -d '{
     "expected_revision": 1,
     "configuration": {
+      "name": "Research",
       "tools": [],
       "operator": {
         "prompt": "A revised research prompt.",
@@ -166,10 +343,11 @@ curl --unix-socket ./state/control.sock \
 | Route | Result |
 | --- | --- |
 | `GET /v1/health` | Readiness, execution availability, generated-build availability, and eligible `generated_profiles`; approval/assignment remain mandatory |
-| `GET /v1/launch-configurations` | Named templates, not running instances |
-| `POST /v1/systems` | New runtime-assigned system/operator IDs and optional pending initial goal; returns 201 |
+| `GET /v1/system-defaults` | Effective general-purpose bootstrap configuration and limits |
+| `POST /v1/systems` | Required name + goal, optional constraints/reduced budget; new IDs and a pending goal, returns 201 |
 | `GET /v1/systems` | Up to 20 owned systems; follow `?after=<next>` when `next` is present |
 | `GET /v1/systems/<system_id>` | Saved configuration, pinned grants, usage/remaining tokens, state, and any blocking reason |
+| `GET /v1/systems/<system_id>/activity` | Read-only snapshot of the current/latest goal: up to 32 agents and the 20 most recent calls and event deliveries; scoped and newest-first |
 | `PUT /v1/systems/<system_id>/configuration` | New immutable revision; stale `expected_revision` returns 409 |
 | `POST /v1/systems/<system_id>/start` | Start one goal under its pinned revision; returns 202 |
 | `POST /v1/systems/<system_id>/stop` | Cancel only that system; returns 202, with `stopping` until cleanup finishes |
@@ -188,12 +366,12 @@ Administrative JSON is never rewritten by the API and has no hot reload. Existin
 instances retain their saved revisions, grants, initial goal, and consumed budget
 across file changes/restarts. Changed/removed referenced definitions produce a
 `blocked_reason`, not an automatic substitution; an explicit revision can select
-currently permitted definitions. Only named templates seed new instances.
+currently permitted definitions. New systems use the administrative bootstrap defaults.
 
 Configuration is limited to 1 MiB and command bodies to 64 KiB. Unknown, duplicate,
 or incorrectly cased JSON keys are rejected. References and grant subsets are
 checked; profile paths must stay under `inputs`, `scratch`, or `output`, with writes
-only to the latter two. Names use lowercase letters, digits, dots, underscores,
+only to the latter two. Configuration identifiers use lowercase letters, digits, dots, underscores,
 and hyphens, beginning with a letter, up to 64 characters.
 
 Quota values must be positive: requests/minute up to 1,000,000, tokens/minute up to
@@ -204,8 +382,8 @@ fit every referenced token quota. Agent counts satisfy
 be revised below consumed plus reserved usage. Stop an active system before revising
 its grants or configuration. Prompt/goal/skill content is capped at 32 KiB.
 
-The provider adapter remains `openai-chat-completions`. Administrative `shared.*`
-definitions are skills; reviewed `runtime.*` executables are built into the daemon's
+Supported provider adapters are listed [above](#ollama-and-azure). Administrative
+`shared.*` definitions are skills; reviewed `runtime.*` executables are built into the daemon's
 registry. Pinned skills become system-message instructions, never permission grants.
 Arbitrary executable paths cannot be installed through configuration. Generated
 source must pass the separate protected evaluation, approval, and assignment path.
@@ -256,8 +434,9 @@ sandbox readiness. Scope comes from that activation, not worker-supplied identit
 
 ### Scoped tools and agent teams
 
-To enable a team, explicitly put these IDs in **both** a launch configuration's
-`tools` and `operator.tools` arrays, and use a model that supports function calls:
+The generic bootstrap already enables scoped delegation. Use a model that supports
+function calls. To customize the allowed set, provide **both** `bootstrap.tools`
+and `bootstrap.operator.tools` (or explicitly revise a stopped system), for example:
 
 ```json
 [
@@ -278,6 +457,8 @@ Plain model text is never treated as code or as a function request.
 
 | Tool | Behavior |
 | --- | --- |
+| `runtime.capabilities` | Current task's exact tool pins, model/profile, remaining ancestral budget/turns, goal deadline, protected check IDs (not cases), and generated-build blockers; grants nothing |
+| `runtime.artifact.put` / `runtime.artifact.get` | Immutable inert text/JSON, up to 3072 UTF-8 bytes and a bounded encoded result; reads restricted to the current system and goal; writes stop at 128 goal artifacts |
 | `runtime.agent.list` | Same-goal collaborators, availability, model/profile, and capability summaries; five per page with `after`/`next`. Shows up to 16 tool names plus the full `tool_count`; the administrator's agent view has full pins |
 | `runtime.agent.propose` | Creates a child with a name, prompt, subset of the current task's tools, and token cap; inherits model/profile; does not launch it |
 | `runtime.task.delegate` | Returns a task ID and persists a waiting continuation; the child runs through a mailbox, then its result wakes the parent |
@@ -362,7 +543,8 @@ Source IDs, scope, classification, and correlation are daemon-stamped. Neither
 new agents nor restarts reset allowances.
 
 All turns share the original goal deadline. The default is the shortest quota
-wait plus three 60-second provider allowances. An authenticated start may set
+wait plus three configured request timeouts for the initial operator's provider
+(60 seconds each when omitted). An authenticated start may set
 `lifetime_seconds` to 1-86400 for scheduled work; agents cannot extend it.
 **Pause does not extend this lifetime**; expired work/input receives a visible
 terminal/dead-letter outcome. Longer lifetimes do not reset turn, event, or token
@@ -432,12 +614,45 @@ provider credentials. The two tokens must differ. Open the printed URL and use
 HTTP Basic username `operator` and the UI token as password. Numeric loopback
 binding, browser authentication, Host/Origin checks, CSRF tokens, escaped HTML,
 and a restrictive CSP are enforced; do not publish this HTTP listener remotely.
+The `same-origin` referrer policy preserves native form POST origins without
+sending referrers to other origins; `Origin: null` remains rejected.
 
-Server-rendered forms expose system/team controls, grants, histories, memory,
-wakeups, tools, and learning evidence/approvals. Advanced commands use editable
-JSON, not a frontend framework. A form retry preserves its command key. Optional
-`?refresh=5` refreshes inspection views without resetting command forms.
+The UI uses status badges, budget summaries and tables for systems, agents, tasks,
+events, tools, memory, schedules, quotas and learning. Raw response JSON and
+advanced command editors are hidden inside **Properties**; errors and blockers
+remain visible without opening it. Primary start/input/pause/resume/stop actions
+do not require editing JSON. A form retry preserves its command key.
+Optional `?refresh=5` refreshes inspection views without resetting command forms.
 Closing the UI does not stop work, approve proposals, or change daemon state.
+The creation form takes **Name + Goal**, with optional constraints and a smaller
+budget. It shows the default model, sandbox and team/token limits; templates are
+not needed. Names and constraints are stored in immutable configuration revisions.
+Creation remains inactive until an explicit start.
+
+**Run a saved initial goal:** open the system from the Systems table, then click
+**Start system**. Leave the replacement goal in **Start options** blank; the daemon
+uses the already-saved goal, not a duplicate. After that goal has been used, the
+form becomes **Start new goal**. A paused system instead offers **Resume system**.
+
+**Watch the team:** click **Watch activity** from the dashboard or system overview.
+The Activity view shows the operator and agent creation hierarchy, current task
+assignments, waiting reasons, model admission/calls, requested/completed tools,
+token usage and a recent-event timeline. It reflects durable recorded work, not
+hidden model reasoning, and refreshes every five seconds. **Pause live updates**
+(`?refresh=off`) keeps Properties open for inspection. The view has no editable
+forms; changing focus or closing it does not control execution.
+Each snapshot is a scoped, read-only transaction for the current/latest goal.
+At most 32 agents and 20 recent calls/event deliveries are displayed; truncation
+is explicit, and the ordinary paginated histories remain available.
+Restart both daemon and UI after rebuilding to load the new activity endpoint.
+
+Autonomy is bounded, not unattended authority expansion. The operator can store
+plans/results, delegate, draft tools and request protected evaluation. Missing
+toolchains, resource-confined profiles or human-owned checks are visible blockers;
+exact-artifact approval and assignment remain separate human actions. Waiting
+releases the worker but does not extend the eight-turn task cap or goal lifetime.
+For a paper-trading goal, simulated fills/accounting must come from actual approved
+execution, not invented model output. No live-market access is granted by this setup.
 
 Text attachments are bounded to 3072 UTF-8 bytes, with a display name but no host
 path. They become inert scoped JSON artifacts and attributed `user.input` events
@@ -562,10 +777,11 @@ Only explicit HTTP 429 rejection is retried, at most three attempts. Supported
 `Retry-After` seconds/dates establish a persisted shared cooldown; absent/invalid
 headers use bounded jittered backoff. Each attempt consumes rate capacity and
 re-enters admission. Queue waits respect each group's deadline; the overall
-activation deadline is the shortest group wait plus three 60-second provider-call
-allowances. No timeout, disconnected stream, missing usage, or ambiguous provider
-failure is automatically replayed. Disable hidden gateway retries where possible;
-the daemon cannot observe or guarantee accounting for those external attempts.
+activation deadline is the shortest group wait plus three configured provider-call
+allowances (60 seconds each by default). No timeout, disconnected stream, missing
+usage, or ambiguous provider failure is automatically replayed. Disable hidden
+gateway retries where possible; the daemon cannot observe or guarantee accounting
+for those external attempts.
 
 SQLite migrates version-1/2/3/4 state transactionally to version 5; JSON stays at
 `schema_version:1`. On restart, eligible queued work resumes, including safe
@@ -578,6 +794,10 @@ deduplication prevent simultaneous activations and duplicate input application.
 Ambiguous dispatched model/subprocess outcomes become `unknown` and fail the
 affected task, preserving reservations, rate state, cooldowns, and receipts.
 There is no blind side-effect retry or automatic refund/reconciliation endpoint.
+New failed event deliveries show the sanitized model failure reason when available;
+provider deadline expiration and cancellation are reported separately, including
+when a response or stream was interrupted. Other worker failures still direct the
+administrator to daemon diagnostics rather than exposing raw process errors.
 Legacy version-2 unfinished goals have no continuation/mailbox and remain
 unrecoverable rather than being synthesized into new work. New goals require explicit starts.
 Storage/accounting failures disable new dispatch; emergency stop remains available.
@@ -689,6 +909,10 @@ after a crash, replay commands, rotate the control token, and revalidate removed
 definitions. Inactive-system scenarios still assert zero provider calls and no
 implicit workers. Operator scenarios assert fake-provider responses/usage, shared
 limits, streaming cancellation, targeted stop, idempotency, and abrupt recovery.
+Ollama and Azure scenarios use local HTTP/TLS fixtures and the real
+`DefaultAzureCredential` CLI path with a fixture `az`, never a personal login.
+They cover token rotation/expiry, keyless responses, streaming, redaction,
+pre-dispatch authentication failure, and persisted usage across daemon restarts.
 Team scenarios run two operators and children with one active slot per system,
 native text subprocesses and scoped artifacts. Coverage includes tool/skill denial,
 confused-deputy prevention, immutable assignments/drafts, revocation, delivery

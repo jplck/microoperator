@@ -12,6 +12,7 @@ import (
 )
 
 func (api *controlAPI) registerRuntimeRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /v1/systems/{system_id}/activity", api.activity)
 	mux.HandleFunc("GET /v1/tools", api.tools)
 	mux.HandleFunc("GET /v1/tools/{tool_id}", api.tools)
 	mux.HandleFunc("GET /v1/systems/{system_id}/tools", api.tools)
@@ -31,6 +32,18 @@ func (api *controlAPI) registerRuntimeRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/systems/{system_id}/{action}", api.control)
 	mux.HandleFunc("POST /v1/systems/{system_id}/agents/{agent_id}/{action}", api.control)
 	mux.HandleFunc("POST /v1/systems/{system_id}/goals/{goal_id}/{action}", api.control)
+}
+
+func (api *controlAPI) activity(w http.ResponseWriter, r *http.Request) {
+	snapshot, err := api.store.Activity(r.Context(), localAdministrator, r.PathValue("system_id"))
+	if err == nil {
+		snapshot.System, err = api.cfg.Inspect(snapshot.System)
+	}
+	if err != nil {
+		api.failure(w, err)
+		return
+	}
+	api.respond(w, http.StatusOK, snapshot)
 }
 
 func (api *controlAPI) tools(w http.ResponseWriter, r *http.Request) {

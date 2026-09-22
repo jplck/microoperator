@@ -59,13 +59,13 @@ func TestControlAuthorizationValidationAndRevisions(t *testing.T) {
 	store, configID := fixtureStore(t, cfg)
 	var logs bytes.Buffer
 	handler := newControlHandler(store, cfg, configID, fixtureControlToken, log.New(&logs, "", 0), nil)
-	for _, route := range []string{"/v1/health", "/v1/launch-configurations", "/v1/systems", "/v1/unknown"} {
+	for _, route := range []string{"/v1/health", "/v1/system-defaults", "/v1/systems", "/v1/unknown"} {
 		response := controlRequest(handler, "GET", route, "", "", "wrong")
 		if response.Code != http.StatusUnauthorized {
 			t.Fatalf("unauthenticated route %s: %d", route, response.Code)
 		}
 	}
-	request := httptest.NewRequest("POST", "http://localhost/v1/systems", strings.NewReader(`{"launch":"research"}`))
+	request := httptest.NewRequest("POST", "http://localhost/v1/systems", strings.NewReader(`{"name":"research","goal":"fixture goal"}`))
 	request.Header.Set("Authorization", "Bearer "+fixtureControlToken)
 	request.Header.Set("Origin", "https://example.invalid")
 	request.Header.Set("X-Principal", localAdministrator)
@@ -76,17 +76,17 @@ func TestControlAuthorizationValidationAndRevisions(t *testing.T) {
 		t.Fatalf("browser-origin request: %d", response.Code)
 	}
 	for _, tc := range []struct{ name, key, body string }{
-		{"missing key", "", `{"launch":"research"}`},
-		{"invalid key", "bad key", `{"launch":"research"}`},
+		{"missing key", "", `{"name":"research","goal":"fixture goal"}`},
+		{"invalid key", "bad key", `{"name":"research","goal":"fixture goal"}`},
 		{"unknown launch", "unknown", `{"launch":"missing"}`},
-		{"supplied identity", "identity", `{"launch":"research","system_id":"caller-chosen"}`},
-		{"supplied scope", "scope", `{"launch":"research","owner":"other-user"}`},
-		{"implicit execution", "start", `{"launch":"research","start":true}`},
-		{"duplicate fields", "duplicate", `{"launch":"research","launch":"missing"}`},
+		{"supplied identity", "identity", `{"name":"research","system_id":"caller-chosen"}`},
+		{"supplied scope", "scope", `{"name":"research","owner":"other-user"}`},
+		{"implicit execution", "start", `{"name":"research","start":true}`},
+		{"duplicate fields", "duplicate", `{"name":"research","name":"duplicate","goal":"fixture goal"}`},
 		{"incorrect casing", "case", `{"Launch":"research"}`},
 		{"oversized", "big", strings.Repeat(" ", protocol.MaxFrame+1)},
 		{"invalid JSON", "invalid", `{"api_key":"` + fixtureProviderSecret + `"}`},
-		{"empty goal", "goal", `{"launch":"research","goal":""}`},
+		{"empty goal", "goal", `{"name":"research","goal":""}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			response := controlRequest(handler, "POST", "/v1/systems", tc.key, tc.body, fixtureControlToken)
@@ -100,7 +100,7 @@ func TestControlAuthorizationValidationAndRevisions(t *testing.T) {
 		})
 	}
 	assertCount(t, store, "systems", 0)
-	body := `{"launch":"research","goal":"A pending fixture goal."}`
+	body := `{"name":"research","goal":"A pending fixture goal."}`
 	first := decodeSystemResponse(t, controlRequest(handler, "POST", "/v1/systems", "create", body, fixtureControlToken), http.StatusCreated)
 	second := decodeSystemResponse(t, controlRequest(handler, "POST", "/v1/systems", "create-two", body, fixtureControlToken), http.StatusCreated)
 	replay := decodeSystemResponse(t, controlRequest(handler, "POST", "/v1/systems", "create", body, fixtureControlToken), http.StatusCreated)
@@ -123,20 +123,20 @@ func TestControlAuthorizationValidationAndRevisions(t *testing.T) {
 	if response := controlRequest(handler, "PUT", path, "stale", update, fixtureControlToken); response.Code != http.StatusConflict {
 		t.Fatalf("stale revision status %d: %s", response.Code, response.Body.String())
 	}
-	if response := controlRequest(handler, "POST", "/v1/systems", "create", `{"launch":"research"}`, fixtureControlToken); response.Code != http.StatusConflict {
+	if response := controlRequest(handler, "POST", "/v1/systems", "create", `{"name":"research","goal":"fixture goal"}`, fixtureControlToken); response.Code != http.StatusConflict {
 		t.Fatalf("idempotency conflict status %d", response.Code)
 	}
 	if response := controlRequest(handler, "POST", "/v1/systems/"+first.ID+"/start", "start", `{}`, fixtureControlToken); response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("execution accepted without a lifecycle owner: %d", response.Code)
 	}
-	foreign, err := store.CreateSystem(context.Background(), "another-principal", "foreign", state.CreateSystemCommand{Launch: "research"}, cfg, configID)
+	foreign, err := store.CreateSystem(context.Background(), "another-principal", "foreign", state.CreateSystemCommand{Name: "research", Goal: fixtureGoal()}, cfg, configID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if response := controlRequest(handler, "GET", "/v1/systems/"+foreign.ID, "", "", fixtureControlToken); response.Code != http.StatusNotFound {
 		t.Fatalf("foreign system exposed: %d", response.Code)
 	}
-	for _, route := range []string{"/v1/systems", "/v1/health", "/v1/launch-configurations"} {
+	for _, route := range []string{"/v1/systems", "/v1/health", "/v1/system-defaults"} {
 		response := controlRequest(handler, "GET", route, "", "", fixtureControlToken)
 		if response.Code != http.StatusOK || strings.Contains(response.Body.String(), fixtureProviderSecret) ||
 			strings.Contains(response.Body.String(), fixtureControlToken) || strings.Contains(response.Body.String(), foreign.ID) {
@@ -154,7 +154,7 @@ func TestControlPaginationAndStorageFailures(t *testing.T) {
 	handler := newControlHandler(store, cfg, configID, fixtureControlToken, log.New(&bytes.Buffer{}, "", 0), nil)
 	for i := 0; i < 21; i++ {
 		if _, err := store.CreateSystem(context.Background(), localAdministrator, fmt.Sprintf("create-%d", i),
-			state.CreateSystemCommand{Launch: "research"}, cfg, configID); err != nil {
+			state.CreateSystemCommand{Name: "research", Goal: fixtureGoal()}, cfg, configID); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -190,7 +190,7 @@ func TestControlPaginationAndStorageFailures(t *testing.T) {
 		BEGIN SELECT RAISE(ABORT, 'private storage diagnostic'); END;`); err != nil {
 		t.Fatal(err)
 	}
-	response = controlRequest(handler, "POST", "/v1/systems", "storage-failure", `{"launch":"research"}`, fixtureControlToken)
+	response = controlRequest(handler, "POST", "/v1/systems", "storage-failure", `{"name":"research","goal":"fixture goal"}`, fixtureControlToken)
 	if response.Code != http.StatusInternalServerError || strings.Contains(response.Body.String(), "private storage diagnostic") {
 		t.Fatalf("storage failure response: %d %s", response.Code, response.Body.String())
 	}

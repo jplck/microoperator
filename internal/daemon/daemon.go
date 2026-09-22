@@ -84,9 +84,8 @@ func listenControl(directory string) (*net.UnixListener, error) {
 	return listener, nil
 }
 
-// runDaemon owns the store, socket, and HTTP server until shutdown. Loading named
-// launch configurations only records administrative metadata. Only explicit,
-// authenticated start commands activate the reviewed operator.
+// Run owns the store, socket, and HTTP server until shutdown. Only explicit,
+// authenticated start commands activate an operator.
 func Run(ctx context.Context, configPath string, stdout, stderr io.Writer) (err error) {
 	cfg, err := loadConfiguration(configPath, os.LookupEnv)
 	if err != nil {
@@ -204,23 +203,13 @@ func newControlHandler(store *state.Store, cfg state.Configuration, configID, to
 			GeneratedProfiles         []string `json:"generated_profiles"`
 		}{status, available, available && len(profiles) > 0, available && len(profiles) > 0 && cfg.Learning != nil, profiles})
 	})
-	mux.HandleFunc("GET /v1/launch-configurations", func(w http.ResponseWriter, r *http.Request) {
-		type launch struct {
-			Name          string             `json:"name"`
-			Configuration state.SystemConfig `json:"configuration"`
+	mux.HandleFunc("GET /v1/system-defaults", func(w http.ResponseWriter, r *http.Request) {
+		defaults, err := cfg.BootstrapSystem()
+		if err != nil {
+			api.failure(w, err)
+			return
 		}
-		names := make([]string, 0, len(cfg.Systems))
-		for name := range cfg.Systems {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		launches := make([]launch, 0, len(names))
-		for _, name := range names {
-			launches = append(launches, launch{name, cfg.Systems[name]})
-		}
-		api.respond(w, http.StatusOK, struct {
-			Launches []launch `json:"launches"`
-		}{launches})
+		api.respond(w, http.StatusOK, defaults)
 	})
 	mux.HandleFunc("GET /v1/systems", api.list)
 	mux.HandleFunc("POST /v1/systems", api.create)
@@ -412,12 +401,6 @@ func readCommand(w http.ResponseWriter, r *http.Request, target any) (string, er
 func (api *controlAPI) create(w http.ResponseWriter, r *http.Request) {
 	var command state.CreateSystemCommand
 	key, err := readCommand(w, r, &command)
-	if err == nil && !state.ConfigName.MatchString(command.Launch) {
-		err = state.Invalid("launch", "invalid launch-configuration name")
-	}
-	if err == nil && command.Goal != nil && (strings.TrimSpace(*command.Goal) == "" || len(*command.Goal) > 32768) {
-		err = state.Invalid("goal", "must contain 1-32768 bytes when supplied")
-	}
 	if err != nil {
 		api.failure(w, err)
 		return

@@ -212,6 +212,8 @@ type DelegateArgs struct {
 
 func (engine *workflow) builtin(ctx context.Context, tx *sql.Tx, e ExecutionRecord, t TaskRecord, name, arguments string) (string, error) {
 	switch name {
+	case "runtime.capabilities", "runtime.artifact.put", "runtime.artifact.get":
+		return engine.bootstrapTool(ctx, tx, t, name, arguments)
 	case "runtime.learning.evaluate":
 		var args struct {
 			ToolID   string `json:"tool_id"`

@@ -12,7 +12,7 @@ import (
 func fixtureCall(t *testing.T, b *admission, configID, key string, stream bool) ExecutionRecord {
 	t.Helper()
 	goal := "fixture goal"
-	record, err := b.store.CreateSystem(context.Background(), localAdministrator, "create-"+key, CreateSystemCommand{"research", &goal}, b.cfg, configID)
+	record, err := b.store.CreateSystem(context.Background(), localAdministrator, "create-"+key, CreateSystemCommand{Name: "research", Goal: &goal}, b.cfg, configID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,6 +31,47 @@ func admitCall(t *testing.T, b *admission, e ExecutionRecord, want bool) Executi
 		t.Fatalf("admit %s: admitted=%v err=%v state=%s reason=%s", e.CallID, admitted, err, current.State, current.Reason)
 	}
 	return current
+}
+
+func TestProviderTimeoutSetsDefaultGoalDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		timeout, lifetime int64
+		want              time.Duration
+	}{
+		{"default", 0, 0, 210 * time.Second},
+		{"local model", 600, 0, 1830 * time.Second},
+		{"short request", 1, 0, 33 * time.Second},
+		{"explicit goal deadline", 600, 17, 17 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := fixtureConfiguration(t)
+			provider := cfg.Providers["primary"]
+			provider.TimeoutSeconds = tc.timeout
+			cfg.Providers["primary"] = provider
+			store, id := fixtureStore(t, cfg)
+			ctx := context.Background()
+			record, err := store.CreateSystem(ctx, localAdministrator, "create", CreateSystemCommand{Name: "research", Goal: fixtureGoal()}, cfg, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Unix(1720000000, 123000000)
+			record, err = store.StartSystem(ctx, localAdministrator, "start", record.ID, "fixture-owner",
+				StartSystemCommand{ExpectedRevision: 1, LifetimeSeconds: tc.lifetime}, cfg, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if record.Execution.Deadline != now.Add(tc.want).UnixMilli() ||
+				record.Execution.WaitDeadline != now.Add(30*time.Second).UnixMilli() {
+				t.Fatalf("request timeout changed the wrong deadline: %+v", record.Execution)
+			}
+			var deadline int64
+			if err := store.db.QueryRow(`SELECT deadline FROM goals WHERE system_id=? AND goal_id=?`,
+				record.ID, record.Execution.GoalID).Scan(&deadline); err != nil || deadline != record.Execution.Deadline {
+				t.Fatalf("goal did not retain its shared deadline: %d, %v", deadline, err)
+			}
+		})
+	}
 }
 
 func TestStoreMigrationFromPopulatedVersionOne(t *testing.T) {
@@ -57,7 +98,7 @@ func TestStoreMigrationFromPopulatedVersionOne(t *testing.T) {
 		t.Fatal(err)
 	}
 	goal := "preserve this goal"
-	record, err := legacy.CreateSystem(context.Background(), localAdministrator, "legacy", CreateSystemCommand{"research", &goal}, cfg, id)
+	record, err := legacy.CreateSystem(context.Background(), localAdministrator, "legacy", CreateSystemCommand{Name: "research", Goal: &goal}, cfg, id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +133,7 @@ func TestStoreMigrationFromPopulatedVersionOne(t *testing.T) {
 	if _, err := migrated.db.Exec(`UPDATE goals SET system_id='foreign'`); err == nil {
 		t.Fatal("migration disabled foreign keys")
 	}
-	replay, err := migrated.CreateSystem(context.Background(), localAdministrator, "legacy", CreateSystemCommand{"research", &goal}, cfg, id)
+	replay, err := migrated.CreateSystem(context.Background(), localAdministrator, "legacy", CreateSystemCommand{Name: "research", Goal: &goal}, cfg, id)
 	if err != nil || replay.ID != record.ID {
 		t.Fatalf("legacy receipt failed: %+v %v", replay, err)
 	}
@@ -122,7 +163,7 @@ func TestStoreMigrationPreservesPopulatedVersionTwo(t *testing.T) {
 		t.Fatal(err)
 	}
 	goal := "legacy dispatched goal"
-	record, err := legacy.CreateSystem(context.Background(), localAdministrator, "legacy-v2", CreateSystemCommand{"research", &goal}, cfg, id)
+	record, err := legacy.CreateSystem(context.Background(), localAdministrator, "legacy-v2", CreateSystemCommand{Name: "research", Goal: &goal}, cfg, id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +211,7 @@ func TestStoreMigrationPreservesPopulatedVersionTwo(t *testing.T) {
 	if err := migrated.db.QueryRow(`SELECT cooldown_until FROM quota_state WHERE group_name='account'`).Scan(&cooldown); err != nil || cooldown != now+30000 {
 		t.Fatalf("cooldown lost: %d %v", cooldown, err)
 	}
-	replay, err := migrated.CreateSystem(context.Background(), localAdministrator, "legacy-v2", CreateSystemCommand{"research", &goal}, cfg, id)
+	replay, err := migrated.CreateSystem(context.Background(), localAdministrator, "legacy-v2", CreateSystemCommand{Name: "research", Goal: &goal}, cfg, id)
 	if err != nil || replay.ID != record.ID {
 		t.Fatalf("legacy receipt lost: %+v %v", replay, err)
 	}

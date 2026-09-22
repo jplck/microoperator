@@ -38,12 +38,13 @@ type daemonFixture struct {
 	client  *http.Client
 }
 
-func startDaemonFixture(t *testing.T, filename, token string) *daemonFixture {
+func startDaemonFixture(t *testing.T, filename, token string, env ...string) *daemonFixture {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
 	fixture := &daemonFixture{cancel: cancel, done: make(chan struct{})}
 	fixture.cmd = exec.CommandContext(ctx, microoperatorBinary, "daemon", "--config", filename)
 	fixture.cmd.Env = []string{"LANG=C", "TZ=UTC", protocol.ControlTokenEnv + "=" + token, fixtureProviderEnv + "=" + fixtureProviderSecret}
+	fixture.cmd.Env = append(fixture.cmd.Env, env...)
 	fixture.cmd.Stderr = &fixture.stderr
 	fixture.cmd.WaitDelay = time.Second
 	stdout, err := fixture.cmd.StdoutPipe()
@@ -202,11 +203,11 @@ func TestDaemonSystemsSurviveRestartWithoutExecution(t *testing.T) {
 		t.Fatalf("configuration declarations created systems: %d %s", status, data)
 	}
 	goal := "Record this goal, but do not execute it."
-	create := state.CreateSystemCommand{Launch: "research", Goal: &goal}
+	create := state.CreateSystemCommand{Name: "research", Goal: &goal}
 	first := daemonSystem(t, firstDaemon, fixtureControlToken, "POST", "/v1/systems", "first", create, http.StatusCreated)
 	second := daemonSystem(t, firstDaemon, fixtureControlToken, "POST", "/v1/systems", "second", create, http.StatusCreated)
 	if first.ID == second.ID || first.OperatorID == second.OperatorID || first.Goal.ID == second.Goal.ID {
-		t.Fatal("two instances from one launch configuration share identity")
+		t.Fatal("two systems created from the same goal share identity")
 	}
 	next := first.Configuration
 	next.Operator.Prompt = "Only the first instance changes."
@@ -224,10 +225,10 @@ func TestDaemonSystemsSurviveRestartWithoutExecution(t *testing.T) {
 	}
 	firstDaemon.stop(t, false)
 
-	template := cfg.Systems["research"]
+	template := *cfg.Bootstrap
 	template.Operator.Prompt = "A changed template must not overwrite either instance."
 	template.Limits.TokenBudget = 99999
-	cfg.Systems["research"] = template
+	cfg.Bootstrap = &template
 	writeFixtureConfiguration(t, filename, cfg)
 	rotatedToken := fixtureControlToken + "-rotated"
 	secondDaemon := startDaemonFixture(t, filename, rotatedToken)
@@ -261,7 +262,7 @@ func TestDaemonSystemsSurviveRestartWithoutExecution(t *testing.T) {
 	cfg.QuotaGroups = nil
 	cfg.SandboxProfiles = nil
 	cfg.Tools = nil
-	cfg.Systems = nil
+	cfg.Bootstrap = nil
 	writeFixtureConfiguration(t, filename, cfg)
 	thirdDaemon := startDaemonFixture(t, filename, rotatedToken)
 	recovered = daemonSystem(t, thirdDaemon, rotatedToken, "GET", "/v1/systems/"+first.ID, "", nil, http.StatusOK)

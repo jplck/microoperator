@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}} - Microoperator</title>
+{{if .Refresh}}<meta http-equiv="refresh" content="5">{{end}}
+<style>
+:root{color-scheme:light;--ink:#18263b;--muted:#52627a;--line:#dbe3ee;--blue:#205cba;--bg:#f4f7fb}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 system-ui,-apple-system,sans-serif}
+a{color:var(--blue);text-underline-offset:3px}a:hover{color:#143e80}
+:focus-visible{outline:3px solid #699df1;outline-offset:3px}
+.skip{position:absolute;left:1rem;top:-4rem;background:white;padding:.6rem;z-index:2}.skip:focus{top:1rem}
+.topbar{background:#14243e;color:white;border-bottom:3px solid #6fa3ff}.topbar nav{max-width:1280px;margin:auto;display:flex;align-items:center;gap:1.5rem;padding:1rem 1.5rem;flex-wrap:wrap}
+.topbar a{color:#e3ecfc;text-decoration:none}.topbar .brand{font-size:1.1rem;font-weight:750;margin-right:auto;letter-spacing:.02em}
+main{max-width:1280px;margin:0 auto;padding:2rem 1.5rem 3rem}h1,h2,h3,p{margin-top:0}h1{font-size:clamp(1.6rem,4vw,2.2rem);line-height:1.2;margin-bottom:.5rem;overflow-wrap:anywhere}
+h2{font-size:1.1rem;margin-bottom:1rem}h3{font-size:1rem;margin-bottom:.25rem}.subtitle,small,.muted{color:var(--muted)}small{display:block;font-size:.85rem}
+.heading{display:flex;align-items:flex-start;justify-content:space-between;gap:1rem}.live{font-size:.8rem;color:#245f45;white-space:nowrap}.live:before{content:"";display:inline-block;width:.5rem;height:.5rem;border-radius:50%;background:#319265;margin-right:.5rem}
+.links{display:flex;flex-wrap:wrap;gap:.45rem;margin:1.25rem 0}.links a{background:white;border:1px solid var(--line);border-radius:7px;padding:.4rem .7rem;text-decoration:none;font-size:.85rem}.links a:first-child{border-color:#a6c1eb}
+.panel{background:white;border:1px solid var(--line);border-radius:12px;padding:1.25rem;margin:1.25rem 0;box-shadow:0 2px 5px #10203a05}
+.notice,.error{padding:1rem 1.2rem;border-radius:8px;margin:1rem 0;overflow-wrap:anywhere}.notice{background:#eaf2ff;border:1px solid #c9dcfa;color:#204775}.error{background:#fff0f0;border:1px solid #ebbec2;color:#842a31}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:.8rem;margin:1.25rem 0}.stat{background:white;border:1px solid var(--line);border-radius:10px;padding:1rem}.stat dt{color:var(--muted);font-size:.8rem}.stat dd{margin:.3rem 0 0;font-size:1.25rem;font-weight:650;overflow-wrap:anywhere}
+.badge{display:inline-block;font-size:.76rem;font-weight:650;line-height:1.4;padding:.22rem .55rem;border-radius:20px;background:#edf0f5;color:#42526b;text-transform:capitalize;white-space:nowrap}
+.status-running,.status-active,.status-leased{background:#e7f0ff;color:#2058a5}.status-completed,.status-acked{background:#e5f5ec;color:#226142}
+.status-waiting,.status-paused,.status-pending,.status-pending_approval,.status-queued{background:#fff2d7;color:#7b570a}
+.status-failed,.status-rejected,.status-unknown{background:#fce7e9;color:#9d2837}
+.table-panel{padding:0;overflow:hidden}.table-scroll{overflow-x:auto}table{width:100%;border-collapse:collapse;text-align:left}caption{text-align:left;font-size:1.05rem;font-weight:650;padding:1.1rem 1.2rem}
+th{background:#f7f9fc;color:var(--muted);font-size:.76rem;text-transform:uppercase;letter-spacing:.035em;font-weight:650}th,td{padding:.85rem 1.1rem;border-top:1px solid var(--line);vertical-align:top}td{font-size:.88rem;max-width:25rem;overflow-wrap:anywhere}
+tbody tr:hover{background:#fafcff}.empty{padding:2rem;text-align:center;color:var(--muted)}.goal,.outcome{white-space:pre-wrap;overflow-wrap:anywhere}
+label{display:block;margin:.85rem 0;font-weight:550;font-size:.9rem}input:not([type=hidden]),textarea,select{display:block;width:100%;margin-top:.35rem;padding:.7rem .8rem;border:1px solid #b8c6d9;border-radius:7px;background:white;color:var(--ink);font:inherit}
+textarea{min-height:7rem;resize:vertical}input[type=number]{max-width:20rem}input[type=file]{font-weight:400}button{border:1px solid transparent;border-radius:7px;background:var(--blue);color:white;padding:.65rem 1.05rem;font:600 .9rem system-ui;cursor:pointer;margin:.8rem 0 .4rem}
+button:hover{background:#154887}.danger-confirm button{background:#a33240}.quick-action{display:inline-block;margin-right:.65rem}.quick-action button{margin-top:0;background:white;color:var(--blue);border-color:#b8c6d9}
+details{margin:1rem 0}summary{cursor:pointer;color:var(--blue);font-weight:600;list-style-position:inside}details[open]>summary{margin-bottom:1rem}
+.properties{border:1px solid var(--line);border-radius:10px;padding:1rem 1.2rem;margin-top:2rem;background:#edf2f8}.properties pre{background:#17253d;color:#e7effc;padding:1rem;border-radius:7px;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.6 ui-monospace,monospace;max-height:36rem;overflow:auto}
+.properties textarea{font:13px/1.5 ui-monospace,monospace;min-height:12rem}.json-form{border-top:1px solid #c4cfdf;margin-top:1.5rem;padding-top:1.5rem}
+.team{list-style:none;padding:0;margin:0}.agent-card{position:relative;margin:1rem 0 1rem min(calc(var(--depth)*22px),132px);border:1px solid var(--line);border-left:4px solid #7fa9e9;border-radius:9px;padding:1rem 1.1rem;background:white}
+.agent-card .heading{align-items:center}.role{font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}.agent-card p{margin:.5rem 0}.activity{font-weight:600}.agent-card .reason{background:#fff4de;color:#79541a;border-radius:6px;padding:.65rem}.agent-meta{display:flex;flex-wrap:wrap;gap:1rem;color:var(--muted);font-size:.8rem}
+.timeline{list-style:none;margin:0;padding:0}.timeline li{display:grid;grid-template-columns:105px 1fr;gap:1rem;border-left:2px solid #d7e3f4;padding:.3rem 0 1.2rem 1rem;margin-left:.4rem}.timeline time{font-size:.8rem;color:var(--muted)}.timeline p{margin:.25rem 0;font-size:.88rem;overflow-wrap:anywhere}
+footer{border-top:1px solid var(--line);padding:1.5rem;color:var(--muted);font-size:.8rem;text-align:center}
+@media(max-width:640px){main{padding:1.25rem .8rem}.topbar nav{padding:1rem;gap:.8rem}.topbar .brand{width:100%}.heading{flex-wrap:wrap}.stats{grid-template-columns:1fr 1fr}.agent-card{margin-left:min(calc(var(--depth)*10px),30px)}.timeline li{grid-template-columns:1fr;gap:.2rem}th,td{padding:.7rem}.panel{padding:1rem}.table-panel{padding:0}}
+@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto}}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="topbar"><nav aria-label="Main navigation"><a class="brand" href="/">Microoperator</a><a href="/">Systems</a><a href="/tools">Tool catalog</a><a href="/broker">Model broker</a></nav></header>
+<main id="main">
+<div class="heading"><div><p class="subtitle">{{.Subtitle}}</p><h1>{{.Title}}</h1></div>{{if .State}}<span class="badge status-{{.State}}">{{.State}}</span>{{end}}{{if .Refresh}}<span class="live">Updates every 5 seconds</span>{{end}}</div>
+{{if .Error}}<div class="error" role="alert">{{.Error}}</div>{{end}}
+{{if .Notice}}<div class="notice" role="status">{{.Notice}}</div>{{end}}
+{{if .Links}}<nav class="links" aria-label="Page navigation">{{range .Links}}<a href="{{.URL}}">{{.Title}}</a>{{end}}</nav>{{end}}
+{{if .Stats}}<dl class="stats">{{range .Stats}}<div class="stat"><dt>{{.Label}}</dt><dd>{{.Value}}</dd></div>{{end}}</dl>{{end}}
+{{if .Goal}}<section class="panel"><h2>{{.GoalLabel}}</h2><p class="goal">{{.Goal}}</p></section>{{end}}
+{{if .Outcome}}<section class="panel"><h2>Latest result</h2><p class="outcome">{{.Outcome}}</p><small>Full response and metadata are available in Properties.</small></section>{{end}}
+{{if .Agents}}<section aria-label="Operator and agent activity"><h2>Operator and team</h2><ol class="team">
+{{range .Agents}}<li class="agent-card" style="--depth: {{.Depth}}"><div class="heading"><div><span class="role">{{.Role}}</span><h3>{{.Name}}</h3></div><span class="badge status-{{.State}}">{{.State}}</span></div>
+{{if .Parent}}<small>Created by {{.Parent}}</small>{{end}}<p class="activity">{{.Activity}}</p>
+{{if .Assignment}}<p>{{.Assignment}}</p>{{end}}{{if .Reason}}<p class="reason">{{.Reason}}</p>{{end}}{{if .Result}}<p>{{.Result}}</p>{{end}}
+<div class="agent-meta"><span>Model: {{.Model}}</span><span>Task turns: {{.Turns}}</span>{{if .TaskURL}}<a href="{{.TaskURL}}">Task details</a>{{end}}</div></li>{{end}}
+</ol></section>{{end}}
+{{range .Tables}}<section class="panel table-panel"><div class="table-scroll" tabindex="0" role="region" aria-label="{{.Title}}"><table><caption>{{.Title}}</caption><thead><tr>{{range .Columns}}<th scope="col">{{.}}</th>{{end}}</tr></thead><tbody>
+{{range .Rows}}<tr>{{range .}}<td>{{if .URL}}<a href="{{.URL}}">{{.Text}}</a>{{else if .Status}}<span class="badge status-{{.Text}}">{{.Text}}</span>{{else}}{{.Text}}{{end}}</td>{{end}}</tr>
+{{else}}<tr><td class="empty" colspan="{{len .Columns}}">No records yet.</td></tr>{{end}}
+</tbody></table></div></section>{{end}}
+{{if .Agents}}<section class="panel"><h2>Recent events</h2><ol class="timeline">
+{{range .Events}}<li><time>{{.Time}}</time><div><strong>{{.Title}}</strong> <span class="badge status-{{.State}}">{{.State}}</span><p>{{.Route}}</p>{{if .Reason}}<p>{{.Reason}}</p>{{end}}</div></li>{{else}}<li><p class="muted">No events recorded for this goal yet.</p></li>{{end}}
+</ol>{{if .Refresh}}<small>Pause live updates before opening Properties to keep the menu open.</small>{{end}}</section>{{end}}
+{{range .Forms}}{{if ne .Kind "json"}}
+{{if .Danger}}<details class="panel danger-confirm"><summary>{{.Title}}</summary><p>This cancels work in the selected scope. History is retained.</p>{{end}}
+<form method="post" action="/command" class="{{if eq .Kind "action"}}quick-action{{else}}panel{{end}}">
+{{if ne .Kind "action"}}<h2>{{.Title}}</h2>{{end}}
+<input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="key" value="{{.Key}}">
+<input type="hidden" name="kind" value="{{.Kind}}"><input type="hidden" name="path" value="{{.Path}}">
+<input type="hidden" name="method" value="{{.Method}}"><input type="hidden" name="return" value="{{.Return}}">
+{{if eq .Kind "create"}}
+<label>Name<input name="name" maxlength="128" required placeholder="e.g. Paper market research"></label>
+<label>Goal<textarea name="goal" maxlength="32768" required placeholder="What should this system accomplish?"></textarea></label>
+<small>A general-purpose operator plans, delegates and proposes missing capabilities. Creation saves the goal; starting is a separate action.</small>
+<small>Model: {{$.Defaults.Operator.Model}}. Sandbox: {{$.Defaults.Operator.SandboxProfile}}. Agents: {{$.Defaults.Limits.MaxAgents}} ({{$.Defaults.Limits.MaxActiveAgents}} active). Default token budget: {{$.Defaults.Limits.TokenBudget}}.</small>
+<details><summary>Constraints and budget</summary><label>Additional constraints<textarea name="constraints" maxlength="4096"></textarea></label><small>Constraints guide the operator; daemon-enforced grants and limits control authority.</small><label>Token budget (0 = configured default)<input type="number" name="token_budget" min="0" max="{{$.Defaults.Limits.TokenBudget}}" value="0"></label></details>
+<small>Generated tools still require protected checks, human approval and explicit assignment.</small>
+{{else if eq .Kind "start"}}
+<input type="hidden" name="expected_revision" value="{{.Revision}}">
+{{if .PendingGoal}}<p>Run your saved initial goal:</p><p class="goal">{{.PendingGoal}}</p>{{else}}<label>New goal<textarea name="goal" maxlength="32768" required></textarea></label>{{end}}
+<details><summary>Start options</summary>
+{{if .PendingGoal}}<label>Replacement goal (optional; leave blank to use the saved goal)<textarea name="goal" maxlength="32768"></textarea></label>{{end}}
+<label>Token cap (0 = remaining allowance)<input type="number" min="0" name="token_budget" value="0"></label>
+<label>Goal lifetime in seconds (0 = default)<input type="number" min="0" max="86400" name="lifetime_seconds" value="0"></label></details>
+<small>Starting authorizes model calls and budget consumption. Follow progress in Activity.</small>
+{{else if eq .Kind "input"}}
+<label>Instructions, correction or reply<textarea name="content" maxlength="4096" required></textarea></label><details><summary>Address a specific agent</summary><label>Agent ID (blank = operator)<input name="agent_id"></label></details>
+<small>Input is delivered durably at the next safe turn; paused work needs to be resumed.</small>
+{{else if eq .Kind "action"}}<input type="hidden" name="json" value="{{.Body}}">{{end}}
+<button type="submit">{{if .Danger}}Confirm: {{end}}{{.Title}}</button>
+{{if ne .Kind "action"}}<small>Resubmitting this form reuses the same command receipt.</small>{{end}}
+</form>{{if .Danger}}</details>{{end}}{{end}}{{end}}
+{{if .AllowUpload}}<details class="panel"><summary>Attach text context</summary><form method="post" action="/upload" enctype="multipart/form-data">
+<input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="system_id" value="{{.SystemID}}"><input type="hidden" name="key" value="{{.UploadKey}}">
+<label>UTF-8 text, at most 3072 bytes<input type="file" name="file" accept="text/plain,.txt,.md" required></label>
+<label>Agent ID (blank = operator)<input name="agent_id"></label><button type="submit">Attach text</button><small>Stored as untrusted context. Files never grant host access or install code.</small>
+</form></details>{{end}}
+{{if .HasProperties}}<details class="properties" id="properties"><summary>Properties</summary>
+<p class="muted">Raw JSON and advanced configuration. Changes still pass through the daemon's permission and revision checks.</p>
+{{if .Data}}<h2>Response JSON</h2><pre>{{.Data}}</pre>{{end}}
+{{range .Forms}}{{if eq .Kind "json"}}<form method="post" action="/command" class="json-form"><h2>{{.Title}}</h2>
+<input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="key" value="{{.Key}}">
+<input type="hidden" name="kind" value="{{.Kind}}"><input type="hidden" name="path" value="{{.Path}}">
+<input type="hidden" name="method" value="{{.Method}}"><input type="hidden" name="return" value="{{.Return}}">
+<label>Command JSON<textarea name="json" maxlength="65536" required>{{.Body}}</textarea></label><button type="submit">{{.Title}}</button><small>Command ID: {{.Key}}. Resubmitting reuses its durable receipt.</small>
+</form>{{end}}{{end}}</details>{{end}}
+</main>
+<footer>Microoperator is a separate client of the daemon. Closing this UI does not stop work or approve proposals.</footer>
+</body>
+</html>

@@ -45,6 +45,14 @@ formats are unchanged. Unit/component checks, integration-tagged vet, and the
 race-enabled real-process suite passed on Linux/amd64 WSL2 after relocation.
 Package dependency checks preserve the execution and storage boundaries.
 
+**Goal-driven bootstrap:** Creation uses name + goal, optional constraints and a
+reduced token budget. Legacy `systems` templates and launch selection are removed.
+An optional administrative `bootstrap` selects defaults; the generic operator
+discovers task-scoped capabilities, records inert artifacts, delegates and proposes
+missing tools. Name/constraints live in immutable revisions without a SQL migration.
+Build prerequisites, human-owned checks, exact-artifact approval and explicit
+assignment remain mandatory; constraints do not grant authority.
+
 ## 0. Worker-launch foundation
 
 The phase-0 demo command and placeholder worker have been removed. Retained
@@ -86,14 +94,14 @@ in [README.md](README.md#required-profile-for-generated-execution).
   systems, revisions/grants, goals, and the minimum audit records needed here.
   Introduce explicit schema migrations as tables are added.
 - Add daemon startup/shutdown and a restricted local control API. Persist
-  runtime-assigned system IDs independently of named JSON launch configurations.
+  runtime-assigned system IDs independently of user-supplied display names/goals.
 - Support creating/listing/inspecting inactive systems and updating their future
   configuration through authorized, idempotent commands. Keep administrative JSON
   ownership separate from persisted UI/runtime state.
 
 **Acceptance**
 
-Create two instances from one launch configuration, change one, and restart the
+Create two named systems from goals without templates, change one, and restart the
 daemon. IDs, configuration, grants, and state remain distinct and unchanged.
 Invalid configuration or unavailable required credentials prevents readiness;
 error/inspection responses contain no secrets. No worker or model call starts
@@ -150,13 +158,28 @@ credentials stay in the daemon, redirects/proxies are disabled, and model text i
 never interpreted as code or a tool call.
 [internal/daemon/broker.go](internal/daemon/broker.go) performs provider calls through the durable admission and
 settlement operations in [internal/state/broker.go](internal/state/broker.go).
-These share quota groups across aliases, rotate admission across systems, and
+Provider `timeout_seconds` bounds credentials and the complete response (default
+60, configurable to 1-3600); the default shared goal lifetime uses three such
+allowances plus quota wait. The Ollama sample allows 600 seconds. Real-process
+coverage includes a response after 61 seconds, deadline failure, visible sanitized
+event reasons, and reservation-preserving restart without replay.
+Admission and settlement share quota groups across aliases, rotate admission across systems, and
 atomically reserve goal/system allowances. Request buckets,
 rolling token windows, concurrency, queue limits, cooldowns, explicit 429 retries,
 usage uncertainty, and storage-failure denial are enforced.
 [internal/state/execution_store.go](internal/state/execution_store.go) migrates existing state, retains call
 history/receipts, and rejects unrecoverable work visibly rather than replaying
 ambiguous effects. Only authenticated starts launch work; stop remains system-scoped.
+
+The provider extension adds explicit `ollama` (keyless loopback `/v1`) and
+`azure-openai` (HTTPS `/openai/v1`, deployment names) modes without a second broker
+or inference SDK. [internal/provider/credentials.go](internal/provider/credentials.go)
+uses Azure Identity's `DefaultAzureCredential`, including `az login`, only for
+admitted Azure calls. Credential failures before dispatch release budget
+reservations; successful responses redact the current token. Existing API-key
+configuration and persisted schema versions are unchanged. Azure Identity is
+pinned to the Go-1.24-compatible release line rather than raising the toolchain
+requirement for this extension. See [provider setup](README.md#ollama-and-azure).
 
 Component and real daemon/worker scenarios cover fake-provider responses, streaming,
 shared admission, throttling, cancellation, command replay, and graceful/abrupt
@@ -319,6 +342,11 @@ escapes content, bounds inert text uploads and preserves command keys on retry.
 System/team controls, memory, schedules, scoped catalogs, learning evidence and
 approvals use only the daemon API. Real UI/daemon processes control two systems;
 repeated creation deduplicates and daemon work completes after UI shutdown.
+Default presentation uses summary cards, status badges and tables; JSON and
+advanced editors are under Properties. A saved initial goal has a direct Start
+system action without reentry. The read-only Activity snapshot shows the operator/
+agent hierarchy, task blockers and newest model/tool/event work, with bounded
+results and a pausable five-second refresh. It does not change execution state.
 
 ## S. Qualification gate before untrusted execution
 

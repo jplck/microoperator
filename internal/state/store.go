@@ -49,7 +49,6 @@ type SystemRecord struct {
 	LocalTools      map[string]ToolConfig `json:"-"`
 	ID              string                `json:"system_id"`
 	OperatorID      string                `json:"operator_id"`
-	Launch          string                `json:"launch"`
 	State           string                `json:"state"`
 	Revision        int64                 `json:"revision"`
 	ConfigurationID string                `json:"configuration_id"`
@@ -66,8 +65,10 @@ type SystemRecord struct {
 }
 
 type CreateSystemCommand struct {
-	Launch string  `json:"launch"`
-	Goal   *string `json:"goal,omitempty"`
+	Name        string  `json:"name"`
+	Goal        *string `json:"goal"`
+	Constraints string  `json:"constraints,omitempty"`
+	TokenBudget int64   `json:"token_budget,omitempty"`
 }
 
 type ReviseSystemCommand struct {
@@ -428,11 +429,8 @@ func (store *Store) CreateSystem(ctx context.Context, principal, key string,
 	}
 	return store.command(ctx, principal, key, hash, func(tx *sql.Tx) (SystemRecord, error) {
 		var record SystemRecord
-		definition, ok := cfg.Systems[command.Launch]
-		if !ok {
-			return record, Invalid("launch", "unknown launch configuration")
-		}
-		if err := cfg.ValidateSystem(definition); err != nil {
+		definition, err := cfg.creationDefinition(command)
+		if err != nil {
 			return record, err
 		}
 		record.ID, err = NewID("sys_")
@@ -443,7 +441,7 @@ func (store *Store) CreateSystem(ctx context.Context, principal, key string,
 		if err != nil {
 			return record, err
 		}
-		record.Launch, record.State, record.Revision = command.Launch, "inactive", 1
+		record.State, record.Revision = "inactive", 1
 		record.ConfigurationID, record.Configuration = configID, definition
 		record.Grants, err = cfg.GrantsFor(definition)
 		if err != nil {
@@ -452,7 +450,7 @@ func (store *Store) CreateSystem(ctx context.Context, principal, key string,
 		record.CreatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 		if _, err := tx.ExecContext(ctx, `INSERT INTO systems
 			(system_id, owner, operator_id, launch, state, revision, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			record.ID, principal, record.OperatorID, record.Launch, record.State, record.Revision, record.CreatedAt); err != nil {
+			record.ID, principal, record.OperatorID, "", record.State, record.Revision, record.CreatedAt); err != nil {
 			return record, fmt.Errorf("create system: %w", err)
 		}
 		if err := insertRevision(ctx, tx, record, principal, "system.create"); err != nil {
@@ -557,11 +555,11 @@ func insertRevision(ctx context.Context, tx *sql.Tx, record SystemRecord, princi
 func readSystem(ctx context.Context, tx *sql.Tx, principal, systemID string) (SystemRecord, error) {
 	var record SystemRecord
 	var definition, grants []byte
-	err := tx.QueryRowContext(ctx, `SELECT s.system_id, s.operator_id, s.launch, s.state,
+	err := tx.QueryRowContext(ctx, `SELECT s.system_id, s.operator_id, s.state,
 		s.revision, s.used_tokens, s.reserved_tokens, s.created_at, r.config_id, r.definition, r.grants
 		FROM systems s JOIN system_revisions r ON r.system_id = s.system_id AND r.revision = s.revision
 		WHERE s.system_id = ? AND s.owner = ?`, systemID, principal).Scan(
-		&record.ID, &record.OperatorID, &record.Launch, &record.State, &record.Revision,
+		&record.ID, &record.OperatorID, &record.State, &record.Revision,
 		&record.UsedTokens, &record.ReservedTokens, &record.CreatedAt, &record.ConfigurationID, &definition, &grants)
 	if errors.Is(err, sql.ErrNoRows) {
 		return record, ErrSystemNotFound

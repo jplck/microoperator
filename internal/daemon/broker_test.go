@@ -40,6 +40,37 @@ func TestCancelRejectedSessionDoesNotDisableBroker(t *testing.T) {
 	assertCount(t, broker.store, "model_attempts", 0)
 }
 
+func TestAzureAuthenticationFailureReleasesBudgetWithoutDispatch(t *testing.T) {
+	t.Setenv("AZURE_TOKEN_CREDENTIALS", "AzureCLICredential")
+	t.Setenv("PATH", t.TempDir())
+	var requests atomic.Int64
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		completion(w, "must not be requested")
+	}))
+	defer server.Close()
+	cfg := fixtureConfiguration(t)
+	cfg.Providers["primary"] = state.ProviderConfig{Adapter: "azure-openai", BaseURL: server.URL + "/openai/v1"}
+	b, _, id := fixtureBroker(t, cfg)
+	b.client = server.Client()
+	e := fixtureCall(t, b, id, "no-azure-login", false)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, err := b.call(ctx, e)
+	if err != nil || result.State != "failed" || !strings.Contains(result.Reason, "az login") ||
+		result.GoalReserved != 0 || result.Attempts != 1 || result.Retries != 0 || requests.Load() != 0 {
+		t.Fatalf("authentication failure dispatched or retained budget: %+v, %v; requests=%d", result, err, requests.Load())
+	}
+	record, err := b.store.GetSystem(ctx, localAdministrator, e.SystemID)
+	if err != nil || record.UsedTokens != 0 || record.ReservedTokens != 0 || !b.available() {
+		t.Fatalf("authentication failure broke system accounting: %+v, %v", record, err)
+	}
+	replay, err := b.call(ctx, e)
+	if err != nil || replay.State != "failed" || replay.Attempts != 1 || requests.Load() != 0 {
+		t.Fatalf("authentication failure replayed: %+v, %v", replay, err)
+	}
+}
+
 func (c *brokerClock) now() time.Time { return time.UnixMilli(c.milliseconds.Load()) }
 
 func fixtureBroker(t *testing.T, cfg state.Configuration) (*modelBroker, *brokerClock, string) {
@@ -56,7 +87,7 @@ func fixtureBroker(t *testing.T, cfg state.Configuration) (*modelBroker, *broker
 func fixtureCall(t *testing.T, b *modelBroker, configID, key string, stream bool) state.ExecutionRecord {
 	t.Helper()
 	goal := "fixture goal"
-	record, err := b.store.CreateSystem(context.Background(), localAdministrator, "create-"+key, state.CreateSystemCommand{Launch: "research", Goal: &goal}, b.cfg, configID)
+	record, err := b.store.CreateSystem(context.Background(), localAdministrator, "create-"+key, state.CreateSystemCommand{Name: "research", Goal: &goal}, b.cfg, configID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,9 +170,9 @@ func TestBrokerSharedAdmissionAndFairness(t *testing.T) {
 	cfg.Models["alias"] = cfg.Models["default"]
 	b, clock, id := fixtureBroker(t, cfg)
 	a := queuedCall(t, b, id, "a")
-	def := cfg.Systems["research"]
+	def := *cfg.Bootstrap
 	def.Operator.Model = "alias"
-	cfg.Systems["research"] = def
+	cfg.Bootstrap = &def
 	c := queuedCall(t, b, id, "b")
 	admitCall(t, b, c, false)
 	current := admitCall(t, b, a, true)
@@ -181,11 +212,11 @@ func TestBrokerAllQuotaGroupsAndTokenWindow(t *testing.T) {
 	q.MaxConcurrent = 10
 	q.MaxWaitSeconds = 120
 	cfg.QuotaGroups["account"], cfg.QuotaGroups["organization"] = q, q
-	grants, err := cfg.GrantsFor(cfg.Systems["research"])
+	grants, err := cfg.GrantsFor(*cfg.Bootstrap)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, reservation, err := state.ModelRequest(cfg, state.SystemRecord{Configuration: cfg.Systems["research"], Grants: grants}, "fixture goal", false)
+	_, reservation, err := state.ModelRequest(cfg, state.SystemRecord{Configuration: *cfg.Bootstrap, Grants: grants}, "fixture goal", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,11 +313,11 @@ func TestBrokerDenialsAndAtomicReservations(t *testing.T) {
 
 func TestBrokerClockRollbackCannotRefundTokenRate(t *testing.T) {
 	cfg, count := providerConfigFor(t, func(w http.ResponseWriter, r *http.Request) { completion(w, "bounded") })
-	grants, err := cfg.GrantsFor(cfg.Systems["research"])
+	grants, err := cfg.GrantsFor(*cfg.Bootstrap)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, reservation, err := state.ModelRequest(cfg, state.SystemRecord{Configuration: cfg.Systems["research"], Grants: grants}, "fixture goal", false)
+	_, reservation, err := state.ModelRequest(cfg, state.SystemRecord{Configuration: *cfg.Bootstrap, Grants: grants}, "fixture goal", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +341,7 @@ func TestInitialGoalBudgetAndCommandReplay(t *testing.T) {
 	cfg := fixtureConfiguration(t)
 	b, _, id := fixtureBroker(t, cfg)
 	goal := "fixture goal"
-	record, err := b.store.CreateSystem(context.Background(), localAdministrator, "create", state.CreateSystemCommand{Launch: "research", Goal: &goal}, cfg, id)
+	record, err := b.store.CreateSystem(context.Background(), localAdministrator, "create", state.CreateSystemCommand{Name: "research", Goal: &goal}, cfg, id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,7 +392,7 @@ func TestBrokerQueueBoundsAndCancellation(t *testing.T) {
 	b, _, id := fixtureBroker(t, cfg)
 	e := fixtureCall(t, b, id, "one", false)
 	goal := "fixture goal"
-	record, err := b.store.CreateSystem(context.Background(), localAdministrator, "two", state.CreateSystemCommand{Launch: "research", Goal: &goal}, cfg, id)
+	record, err := b.store.CreateSystem(context.Background(), localAdministrator, "two", state.CreateSystemCommand{Name: "research", Goal: &goal}, cfg, id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -474,7 +505,7 @@ func TestBrokerRejectsOversizedAndImpossibleRequests(t *testing.T) {
 	cfg := fixtureConfiguration(t)
 	b, _, id := fixtureBroker(t, cfg)
 	goal := strings.Repeat("\x01", 32768)
-	record, err := b.store.CreateSystem(context.Background(), localAdministrator, "large", state.CreateSystemCommand{Launch: "research", Goal: &goal}, cfg, id)
+	record, err := b.store.CreateSystem(context.Background(), localAdministrator, "large", state.CreateSystemCommand{Name: "research", Goal: &goal}, cfg, id)
 	if err != nil {
 		t.Fatal(err)
 	}

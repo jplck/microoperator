@@ -12,10 +12,10 @@ import (
 
 func knowledgeConfiguration(t *testing.T) Configuration {
 	cfg := fixtureConfiguration(t)
-	def := cfg.Systems["research"]
+	def := *cfg.Bootstrap
 	def.Tools = []string{"runtime.memory.put", "runtime.memory.search", "runtime.schedule.create", "runtime.schedule.cancel", "runtime.events.subscribe", "runtime.events.unsubscribe", "runtime.task.wait", "runtime.agent.propose"}
 	def.Operator.Tools = append([]string{}, def.Tools...)
-	cfg.Systems["research"] = def
+	cfg.Bootstrap = &def
 	q := cfg.QuotaGroups["account"]
 	q.BurstRequests = 20
 	q.TokensPerMinute = 1000000
@@ -26,7 +26,7 @@ func knowledgeConfiguration(t *testing.T) Configuration {
 func knowledgeCall(t *testing.T, engine *fixtureWorkflow, id, key string) ExecutionRecord {
 	t.Helper()
 	prompt := "knowledge goal"
-	s, err := engine.store.CreateSystem(context.Background(), localAdministrator, "create-"+key, CreateSystemCommand{"research", &prompt}, engine.cfg, id)
+	s, err := engine.store.CreateSystem(context.Background(), localAdministrator, "create-"+key, CreateSystemCommand{Name: "research", Goal: &prompt}, engine.cfg, id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +300,7 @@ func TestGoalLifetimeIsExplicitAndBounded(t *testing.T) {
 		t.Fatalf("explicit goal lifetime ignored: %s", remaining)
 	}
 	for _, seconds := range []int64{-1, 86401} {
-		s, err := engine.store.CreateSystem(context.Background(), localAdministrator, fmt.Sprintf("bad-%d", seconds), CreateSystemCommand{Launch: "research"}, cfg, id)
+		s, err := engine.store.CreateSystem(context.Background(), localAdministrator, fmt.Sprintf("bad-%d", seconds), CreateSystemCommand{Name: "research", Goal: fixtureGoal()}, cfg, id)
 		if err != nil {
 			t.Fatal(err)
 		}

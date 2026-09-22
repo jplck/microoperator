@@ -286,7 +286,7 @@ func (store *Store) StartSystem(ctx context.Context, principal, key, systemID, o
 		if err := protocol.CheckFrame(protocol.Message{Type: "task", ID: callID, Data: prompt}); err != nil {
 			return record, Invalid("goal", "encoded worker input exceeds frame limit")
 		}
-		deadline := now.Add(time.Duration(wait)*time.Second + 3*ProviderTimeout).UnixMilli()
+		deadline := now.Add(time.Duration(wait)*time.Second + 3*cfg.Providers[model.Provider].RequestTimeout()).UnixMilli()
 		if command.LifetimeSeconds > 0 {
 			deadline = now.Add(time.Duration(command.LifetimeSeconds) * time.Second).UnixMilli()
 		}

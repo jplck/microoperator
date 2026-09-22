@@ -401,6 +401,12 @@ func (engine *workflow) finishDelivery(ctx context.Context, session ExecutionRec
 		reason := ""
 		if workerErr != nil {
 			state, reason = "dead", TaskFailureReason(workerErr)
+			switch e.State {
+			case "unknown", "failed", "canceled", "rejected":
+				if e.Reason != "" {
+					reason = e.Reason
+				}
+			}
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE mailboxes SET state=?,reason=? WHERE system_id=? AND event_id=?`, state, reason, t.SystemID, session.EventID); err != nil {
 			return err

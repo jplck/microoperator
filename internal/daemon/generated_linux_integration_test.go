@@ -63,18 +63,18 @@ func TestGeneratedPromotionAndExactArtifactExecution(t *testing.T) {
 	profile := cfg.SandboxProfiles["worker"]
 	profile.Resources = &state.ResourceLimits{MemoryBytes: 1 << 30, WorkspaceBytes: 512 << 20, Processes: 256, CPUPercent: 200}
 	cfg.SandboxProfiles["worker"] = profile
-	def := cfg.Systems["research"]
+	def := *cfg.Bootstrap
 	def.Tools = []string{"runtime.task.wait"}
 	def.Operator.Tools = def.Tools
 	def.Limits.MaxActiveAgents = 1
-	cfg.Systems["research"] = def
+	cfg.Bootstrap = &def
 	q := cfg.QuotaGroups["account"]
 	q.BurstRequests = 20
 	cfg.QuotaGroups["account"] = q
 	filename := filepath.Join(t.TempDir(), "daemon.json")
 	writeFixtureConfiguration(t, filename, cfg)
 	d := startDaemonFixture(t, filename, fixtureControlToken)
-	system := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems", "create", map[string]string{"launch": "research", "goal": "wait for review"}, 201)
+	system := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems", "create", map[string]string{"name": "research", "goal": "wait for review"}, 201)
 	base := "/v1/systems/" + system.ID
 	daemonSystem(t, d, fixtureControlToken, "POST", base+"/start", "start", state.StartSystemCommand{ExpectedRevision: 1, LifetimeSeconds: 3600}, 202)
 	waiting := waitSystem(t, d, system.ID, func(s state.SystemRecord) bool { return s.Execution.TaskState == "waiting" })

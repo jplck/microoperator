@@ -22,7 +22,12 @@ import (
 
 func waitSystem(t *testing.T, d *daemonFixture, id string, predicate func(state.SystemRecord) bool) state.SystemRecord {
 	t.Helper()
-	deadline := time.NewTimer(8 * time.Second)
+	return waitSystemFor(t, d, id, 8*time.Second, predicate)
+}
+
+func waitSystemFor(t *testing.T, d *daemonFixture, id string, timeout time.Duration, predicate func(state.SystemRecord) bool) state.SystemRecord {
+	t.Helper()
+	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	tick := time.NewTicker(10 * time.Millisecond)
 	defer tick.Stop()
@@ -109,7 +114,7 @@ func TestOperatorModelsStopAndIsolation(t *testing.T) {
 	d := startDaemonFixture(t, filename, fixtureControlToken)
 	create := func(name string) state.SystemRecord {
 		return daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems", "create-"+name,
-			map[string]any{"launch": "research", "goal": name}, http.StatusCreated)
+			map[string]any{"name": "research", "goal": name}, http.StatusCreated)
 	}
 	a, b := create("alpha"), create("beta")
 	startA := state.StartSystemCommand{ExpectedRevision: 1}
@@ -216,7 +221,7 @@ func TestOperatorCrashDoesNotReplayDispatch(t *testing.T) {
 	writeFixtureConfiguration(t, filename, cfg)
 	d := startDaemonFixture(t, filename, fixtureControlToken)
 	record := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems", "create",
-		map[string]any{"launch": "research", "goal": "wait for cancellation"}, http.StatusCreated)
+		map[string]any{"name": "research", "goal": "wait for cancellation"}, http.StatusCreated)
 	command := state.StartSystemCommand{ExpectedRevision: 1, Stream: true}
 	started := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems/"+record.ID+"/start", "start", command, http.StatusAccepted)
 	receiveProvider(t, requests)
@@ -263,7 +268,7 @@ func TestOperatorThrottlingRetriesThroughAdmission(t *testing.T) {
 	writeFixtureConfiguration(t, filename, cfg)
 	d := startDaemonFixture(t, filename, fixtureControlToken)
 	record := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems", "create",
-		map[string]any{"launch": "research", "goal": "retry explicit rejection"}, http.StatusCreated)
+		map[string]any{"name": "research", "goal": "retry explicit rejection"}, http.StatusCreated)
 	daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems/"+record.ID+"/start", "start", state.StartSystemCommand{ExpectedRevision: 1}, http.StatusAccepted)
 	result := waitSystem(t, d, record.ID, func(s state.SystemRecord) bool { return s.State == "inactive" })
 	if result.Execution.State != "completed" || result.Execution.Attempts != 2 || result.UsedTokens != 18 ||

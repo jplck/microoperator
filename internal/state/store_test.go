@@ -26,7 +26,7 @@ func TestStoreIsolationRevisionsAndRecovery(t *testing.T) {
 	cfg := fixtureConfiguration(t)
 	store, configID := fixtureStore(t, cfg)
 	goal := "Use only fixture evidence."
-	command := CreateSystemCommand{"research", &goal}
+	command := CreateSystemCommand{Name: "research", Goal: &goal}
 	first, err := store.CreateSystem(ctx, localAdministrator, "first", command, cfg, configID)
 	if err != nil {
 		t.Fatal(err)
@@ -45,7 +45,7 @@ func TestStoreIsolationRevisionsAndRecovery(t *testing.T) {
 		t.Fatalf("create replay changed result: %+v, %v", replay, err)
 	}
 	otherGoal := "Different request."
-	_, err = store.CreateSystem(ctx, localAdministrator, "first", CreateSystemCommand{"research", &otherGoal}, cfg, configID)
+	_, err = store.CreateSystem(ctx, localAdministrator, "first", CreateSystemCommand{Name: "research", Goal: &otherGoal}, cfg, configID)
 	if !errors.Is(err, ErrCommandConflict) {
 		t.Fatalf("key reuse: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestStoreAtomicityCancellationAndConcurrency(t *testing.T) {
 		BEGIN SELECT RAISE(ABORT, 'fixture audit unavailable'); END;`); err != nil {
 		t.Fatal(err)
 	}
-	command := CreateSystemCommand{Launch: "research"}
+	command := CreateSystemCommand{Name: "research", Goal: fixtureGoal()}
 	if _, err := store.CreateSystem(ctx, localAdministrator, "retry", command, cfg, configID); err == nil {
 		t.Fatal("audit failure did not block creation")
 	}
@@ -248,14 +248,14 @@ func TestPinnedDefinitionsAndFutureSchema(t *testing.T) {
 	ctx := context.Background()
 	cfg := fixtureConfiguration(t)
 	store, configID := fixtureStore(t, cfg)
-	record, err := store.CreateSystem(ctx, localAdministrator, "create", CreateSystemCommand{Launch: "research"}, cfg, configID)
+	record, err := store.CreateSystem(ctx, localAdministrator, "create", CreateSystemCommand{Name: "research", Goal: fixtureGoal()}, cfg, configID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	originalDigest := record.Grants.DefinitionsDigest
-	template := cfg.Systems["research"]
-	template.Operator.Prompt = "Changed launch template."
-	cfg.Systems["research"] = template
+	template := *cfg.Bootstrap
+	template.Operator.Prompt = "Changed bootstrap defaults."
+	cfg.Bootstrap = &template
 	inspected, err := cfg.Inspect(record)
 	if err != nil || inspected.BlockedReason != "" || inspected.Configuration.Operator.Prompt == template.Operator.Prompt {
 		t.Fatalf("template rewrote an instance: %+v, %v", inspected, err)

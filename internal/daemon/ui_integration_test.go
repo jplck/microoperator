@@ -45,10 +45,10 @@ func TestDetachedUIControlsTwoSystemsAndCanExit(t *testing.T) {
 		}
 		functionCompletion(w, "runtime.task.wait", "wait", map[string]string{"reason": "await user input"})
 	})
-	def := cfg.Systems["research"]
+	def := *cfg.Bootstrap
 	def.Tools = []string{"runtime.task.wait"}
 	def.Operator.Tools = def.Tools
-	cfg.Systems["research"] = def
+	cfg.Bootstrap = &def
 	q := cfg.QuotaGroups["account"]
 	q.BurstRequests = 10
 	cfg.QuotaGroups["account"] = q
@@ -105,6 +105,9 @@ func TestDetachedUIControlsTwoSystemsAndCanExit(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer response.Body.Close()
+		if policy := response.Header.Get("Referrer-Policy"); policy != "same-origin" {
+			t.Fatalf("UI policy suppresses native form Origin: %q", policy)
+		}
 		data, err := io.ReadAll(response.Body)
 		if err != nil {
 			t.Fatal(err)
@@ -117,6 +120,9 @@ func TestDetachedUIControlsTwoSystemsAndCanExit(t *testing.T) {
 	status, page := browse("GET", "/", nil)
 	if status != 200 {
 		t.Fatal(page)
+	}
+	if strings.Contains(page, `name="launch"`) || !strings.Contains(page, `name="name" maxlength="128" required`) {
+		t.Fatal("UI did not offer named goal-driven creation")
 	}
 	csrf := hiddenUIValue(t, page, "csrf")
 	post := func(path, key string, body any, want int) {
@@ -131,7 +137,13 @@ func TestDetachedUIControlsTwoSystemsAndCanExit(t *testing.T) {
 		}
 	}
 	for _, goal := range []string{"alpha", "alpha", "beta"} {
-		post("/v1/systems", "create-"+goal, map[string]string{"launch": "research", "goal": goal}, 201)
+		status, response := browse("POST", "/command", url.Values{
+			"csrf": {csrf}, "key": {"create-" + goal}, "kind": {"create"}, "path": {"/v1/systems"},
+			"method": {"POST"}, "return": {"/"}, "name": {goal}, "goal": {goal}, "token_budget": {"0"},
+		})
+		if status != 201 {
+			t.Fatalf("UI name/goal creation: %d %s", status, response)
+		}
 	}
 	_, data := daemonRequest(t, d, fixtureControlToken, "GET", "/v1/systems", "", nil)
 	var systems struct {
@@ -146,8 +158,28 @@ func TestDetachedUIControlsTwoSystemsAndCanExit(t *testing.T) {
 	ids := map[string]string{}
 	for _, system := range systems.Systems {
 		ids[system.Goal.Prompt] = system.ID
-		post("/v1/systems/"+system.ID+"/start", "start-"+system.ID, state.StartSystemCommand{ExpectedRevision: 1}, 202)
-		waitSystem(t, d, system.ID, func(s state.SystemRecord) bool { return s.Execution.TaskState == "waiting" })
+		status, overview := browse("GET", "/systems/"+system.ID, nil)
+		if status != 200 || !strings.Contains(overview, "Start system") || !strings.Contains(overview, "do not need to enter it again") {
+			t.Fatalf("saved-goal start is unclear: %d %s", status, overview)
+		}
+		start := uiCommandForm(t, overview, "/v1/systems/"+system.ID+"/start")
+		if start.Get("goal") != "" || start.Get("kind") != "start" {
+			t.Fatal("start form would replace the saved initial goal")
+		}
+		for i := 0; i < 2; i++ {
+			if status, response := browse("POST", "/command", start); status != 202 {
+				t.Fatalf("start initial goal: %d %s", status, response)
+			}
+		}
+		waiting := waitSystem(t, d, system.ID, func(s state.SystemRecord) bool { return s.Execution.TaskState == "waiting" })
+		if waiting.Execution.GoalID != system.Goal.ID {
+			t.Fatal("start created a second goal instead of using the initial one")
+		}
+		status, activity := browse("GET", "/systems/"+system.ID+"/activity", nil)
+		if status != 200 || !strings.Contains(activity, "await user input") || !strings.Contains(activity, "runtime.task.wait") ||
+			!strings.Contains(activity, `http-equiv="refresh"`) || !strings.Contains(activity, `class="properties"`) {
+			t.Fatalf("real worker activity not visible: %d %s", status, activity)
+		}
 	}
 	post("/v1/systems/"+ids["alpha"]+"/tools/drafts", "draft", state.DraftCommand{Kind: "executable", Description: "Inert source", Content: "package main\nfunc main(){}", Requires: []string{}}, 201)
 	post("/v1/systems/"+ids["beta"]+"/input", "input", map[string]string{"content": "finish beta"}, 202)
@@ -155,6 +187,11 @@ func TestDetachedUIControlsTwoSystemsAndCanExit(t *testing.T) {
 	case <-betaEntered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("UI input did not reach the actual worker")
+	}
+	status, activity := browse("GET", "/systems/"+ids["beta"]+"/activity?refresh=off", nil)
+	if status != 200 || !strings.Contains(activity, "Calling model default") ||
+		strings.Contains(activity, `http-equiv="refresh"`) || strings.Contains(activity, ids["alpha"]) {
+		t.Fatalf("live model/scope/refresh state incorrect: %d %s", status, activity)
 	}
 	post("/v1/systems/"+ids["alpha"]+"/stop", "stop", struct{}{}, 202)
 	waitSystem(t, d, ids["alpha"], func(s state.SystemRecord) bool { return s.State == "stopped" })

@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "data_dir": "./state",
+  "providers": {
+    "local": {
+      "adapter": "ollama",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "timeout_seconds": 600
+    }
+  },
+  "models": {
+    "default": {
+      "provider": "local",
+      "model": "qwen3.8:27b",
+      "quota_groups": ["local"],
+      "max_output_tokens": 2048,
+      "input_headroom_percent": 20
+    }
+  },
+  "quota_groups": {
+    "local": {
+      "requests_per_minute": 60,
+      "tokens_per_minute": 60000,
+      "burst_requests": 1,
+      "max_concurrent": 1,
+      "queue_capacity": 16,
+      "max_wait_seconds": 30
+    }
+  },
+  "sandbox_profiles": {
+    "worker": {
+      "read": ["inputs"],
+      "read_write": ["scratch", "output"],
+      "network": "blocked"
+    }
+  },
+  "tools": {},
+  "bootstrap": {
+    "operator": {
+      "model": "default",
+      "sandbox_profile": "worker"
+    },
+    "limits": {
+      "max_agents": 8,
+      "max_active_agents": 2,
+      "token_budget": 100000
+    }
+  }
+}

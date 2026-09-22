@@ -24,13 +24,12 @@ import (
 
 func NewClient() *http.Client {
 	return &http.Client{
-		Timeout: state.ProviderTimeout,
 		Transport: &http.Transport{
 			Proxy:               nil,
 			DialContext:         (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 			TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12},
-			TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: state.ProviderTimeout,
-			IdleConnTimeout: 30 * time.Second, MaxIdleConns: 64,
+			TLSHandshakeTimeout: 10 * time.Second,
+			IdleConnTimeout:     30 * time.Second, MaxIdleConns: 64,
 		},
 		// Never forward credentials to a redirect or bypass a configured gateway.
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -92,20 +91,20 @@ func validUsage(usage *chatUsage, maxOutput int64) bool {
 
 func Request(ctx context.Context, client *http.Client, provider state.ProviderConfig, model state.ModelConfig,
 	body []byte, stream bool, key string, now time.Time, attempt int64) state.ProviderResult {
+	ctx, cancel := context.WithTimeout(ctx, provider.RequestTimeout())
+	defer cancel()
 	unknown := state.ProviderResult{Reason: "provider outcome or usage unknown; reservation retained"}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(provider.BaseURL, "/")+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return state.ProviderResult{Known: true, Reason: "provider request invalid before sending"}
 	}
-	request.Header.Set("Authorization", "Bearer "+key)
+	if key != "" {
+		request.Header.Set("Authorization", "Bearer "+key)
+	}
 	request.Header.Set("Content-Type", "application/json")
 	response, err := client.Do(request)
 	if err != nil {
-		unknown.Reason = "provider transport failed; outcome unknown and reservation retained"
-		if ctx.Err() != nil {
-			unknown.Reason = "provider call canceled or deadline exceeded after admission; outcome unknown and reservation retained"
-		}
-		return unknown
+		return requestFailure(ctx, "provider transport failed; outcome unknown and reservation retained")
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusTooManyRequests {
@@ -175,7 +174,7 @@ func Request(ctx context.Context, client *http.Client, provider state.ProviderCo
 								selected = function.Function
 							}
 						}
-						if !allowed || a.Type != "function" || !state.CommandKeyPattern.MatchString(a.ID) || strings.Contains(a.ID, key) || len(a.Function.Arguments) > state.MaxEventBytes {
+						if !allowed || a.Type != "function" || !state.CommandKeyPattern.MatchString(a.ID) || (key != "" && strings.Contains(a.ID, key)) || len(a.Function.Arguments) > state.MaxEventBytes {
 							err = errors.New("invalid model tool call")
 						}
 						var arguments map[string]any
@@ -201,21 +200,35 @@ func Request(ctx context.Context, client *http.Client, provider state.ProviderCo
 		}
 	}
 	if err != nil || len(text) > state.MaxModelText {
-		unknown.Reason = "provider response malformed, incomplete, unsupported, or oversized; reservation retained"
-		return unknown
+		return requestFailure(ctx, "provider response malformed, incomplete, unsupported, or oversized; reservation retained")
 	}
 	if !validUsage(usage, model.MaxOutputTokens) {
 		unknown.Reason = "provider usage missing or invalid; reservation retained"
 		return unknown
 	}
-	text = strings.ReplaceAll(text, key, "[redacted]")
+	if key != "" {
+		text = strings.ReplaceAll(text, key, "[redacted]")
+	}
 	if len(text) > state.MaxModelText || protocol.CheckFrame(protocol.Message{Type: "model.result", ID: "call_" + strings.Repeat("0", 32), Data: text}) != nil {
 		return state.ProviderResult{Known: true, Input: *usage.Input, Output: *usage.Output, Reason: "encoded model output exceeds the worker response limit"}
 	}
 	return state.ProviderResult{Text: text, Input: *usage.Input, Output: *usage.Output, Known: true, Actions: actions}
 }
 
+func requestFailure(ctx context.Context, reason string) state.ProviderResult {
+	switch ctx.Err() {
+	case context.DeadlineExceeded:
+		reason = "provider request deadline exceeded after admission; outcome unknown and reservation retained"
+	case context.Canceled:
+		reason = "provider request canceled after admission; outcome unknown and reservation retained"
+	}
+	return state.ProviderResult{Reason: reason}
+}
+
 func redactArgumentStrings(value any, key string) {
+	if key == "" {
+		return
+	}
 	switch value := value.(type) {
 	case map[string]any:
 		for name, item := range value {

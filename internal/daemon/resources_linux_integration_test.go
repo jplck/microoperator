@@ -480,24 +480,24 @@ func TestResourceQualification(t *testing.T) {
 			functionCompletion(w, "runtime.text.analyze", "analyze", state.TextArguments{Text: "bounded artifact", Save: true})
 		})
 		cfg.SandboxProfiles["worker"] = profile
-		def := cfg.Systems["research"]
+		def := *cfg.Bootstrap
 		def.Tools = []string{"runtime.text.analyze"}
 		def.Operator.Tools = def.Tools
-		cfg.Systems["research"] = def
+		cfg.Bootstrap = &def
 		q := cfg.QuotaGroups["account"]
 		q.BurstRequests = 10
 		cfg.QuotaGroups["account"] = q
 		filename := filepath.Join(t.TempDir(), "daemon.json")
 		writeFixtureConfiguration(t, filename, cfg)
 		d := startDaemonFixture(t, filename, fixtureControlToken)
-		first := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems", "resource-create", map[string]string{"launch": "research", "goal": "artifact"}, 201)
+		first := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems", "resource-create", map[string]string{"name": "research", "goal": "artifact"}, 201)
 		daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems/"+first.ID+"/start", "resource-start", state.StartSystemCommand{ExpectedRevision: 1}, 202)
 		done := waitSystem(t, d, first.ID, func(s state.SystemRecord) bool { return s.State == "inactive" })
 		if done.Execution.Response != "resource tool complete" {
 			d.stop(t, false)
 			t.Fatalf("qualified tool failed: %+v %s", done.Execution, d.stderr.String())
 		}
-		crash := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems", "crash-create", map[string]string{"launch": "research", "goal": "crash"}, 201)
+		crash := daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems", "crash-create", map[string]string{"name": "research", "goal": "crash"}, 201)
 		daemonSystem(t, d, fixtureControlToken, "POST", "/v1/systems/"+crash.ID+"/start", "crash-start", state.StartSystemCommand{ExpectedRevision: 1}, 202)
 		select {
 		case <-dispatched:

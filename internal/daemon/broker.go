@@ -7,7 +7,6 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -16,15 +15,16 @@ import (
 )
 
 type modelBroker struct {
-	mu      sync.Mutex
-	changed chan struct{}
-	broken  bool
-	store   *state.Store
-	cfg     state.Configuration
-	client  *http.Client
-	lookup  func(string) (string, bool)
-	now     func() time.Time
-	logger  *log.Logger
+	mu          sync.Mutex
+	changed     chan struct{}
+	broken      bool
+	store       *state.Store
+	cfg         state.Configuration
+	client      *http.Client
+	credentials modelprovider.Credentials
+	lookup      func(string) (string, bool)
+	now         func() time.Time
+	logger      *log.Logger
 }
 
 var errBrokerUnavailable = errors.New("model broker unavailable after accounting failure; new dispatch is disabled")
@@ -145,10 +145,6 @@ func (b *modelBroker) perform(ctx context.Context, e state.ExecutionRecord) stat
 	}
 	model := b.cfg.Models[e.Model]
 	provider := b.cfg.Providers[model.Provider]
-	key, ok := b.lookup(provider.APIKeyEnv)
-	if !ok || strings.TrimSpace(key) == "" || strings.ContainsAny(key, "\r\n") {
-		return state.ProviderResult{Known: true, Reason: "provider credential unavailable before request"}
-	}
 	body, _, err := state.ModelRequest(b.cfg, record, e.Prompt, e.Stream)
 	if len(e.Request) > 0 {
 		body, err = e.Request, nil
@@ -156,8 +152,15 @@ func (b *modelBroker) perform(ctx context.Context, e state.ExecutionRecord) stat
 	if err != nil {
 		return state.ProviderResult{Known: true, Reason: "provider request rejected before sending"}
 	}
-	requestCtx, cancel := context.WithTimeout(ctx, state.ProviderTimeout)
+	requestCtx, cancel := context.WithTimeout(ctx, provider.RequestTimeout())
 	defer cancel()
+	if requestCtx.Err() != nil {
+		return state.ProviderResult{Known: true, Reason: "canceled before sending provider request"}
+	}
+	key, err := b.credentials.Token(requestCtx, provider, b.lookup)
+	if err != nil {
+		return state.ProviderResult{Known: true, Reason: err.Error()}
+	}
 	if requestCtx.Err() != nil {
 		return state.ProviderResult{Known: true, Reason: "canceled before sending provider request"}
 	}

@@ -72,15 +72,30 @@ unknown fields instead of guessing their meaning.
 
 | Data | Source of truth | How it changes |
 | --- | --- | --- |
-| Providers, model aliases, quota groups, shared tool definitions, sandbox profiles, launch configurations | Administrative JSON | User edits file and restarts daemon; no hot reload in v1 |
+| Providers, model aliases, quota groups, shared tool definitions, sandbox profiles, bootstrap defaults | Administrative JSON | User edits file and restarts daemon; no hot reload in v1 |
 | Created systems, agent revisions, system-local tools, grants, tasks, usage, memory, approvals | SQLite | Authenticated runtime commands, including UI actions |
-| Credentials | Named environment variables in the daemon process | User supplies them outside JSON; never forward to workers or return through the API |
+| Credentials | Daemon environment or Azure Identity credential sources | User configures them outside JSON; never forward tokens to workers or return them through the API |
 
-JSON `systems` entries are **named launch configurations**, not running instances.
-The UI lists them and creates a system by copying the selected configuration into
-SQLite with a new runtime-assigned `system_id`. Creation does not imply starting;
-the UI may offer a combined create-and-start action. File declarations never
-autostart work or overwrite existing systems on restart.
+System creation takes **name and goal**, with optional natural-language constraints
+and a smaller token budget. No domain template is required or selected. The
+optional administrative `bootstrap` supplies model/profile, tool and resource
+defaults; omitted settings use the built-in general-purpose operator. Effective
+defaults are exposed through `GET /v1/system-defaults`. The former JSON `systems`
+map, `launch` request field and launch-configuration endpoint are removed.
+
+The daemon persists the name and constraints in the immutable system configuration
+revision, with a pending goal and a runtime-assigned `system_id`. Names are display
+labels, not identity or authority. Creation never starts work or makes model calls;
+an explicit authenticated start is required. File settings never overwrite existing
+runtime state. The SQLite layout remains unchanged; no automatic data deletion occurs.
+
+The operator establishes success criteria, inspects its actual capabilities, plans,
+delegates narrowly and proposes missing skills/tools. It uses executable evidence,
+not narrative assertions, for measurements or completed actions. Missing permissions,
+build prerequisites, protected checks or approvals cause a visible durable wait.
+Natural-language constraints accompany every agent's model context but never grant
+authority. Generated artifacts still require protected evaluation, human approval
+and explicit assignment; bootstrapping does not bypass those gates.
 
 Existing systems retain their persisted configuration and budgets. After a daemon
 restart, only previously running systems are eligible for recovery/resumption;
@@ -91,9 +106,12 @@ affected work with a visible reason, never an implicit substitute.
 ### 2.2. Example configuration
 
 The versioned loader, model execution, and reviewed delegation operations are
-implemented. Use the [runnable daemon example](README.md#daemon) and
+implemented. [microoperator.example.json](microoperator.example.json) provides
+local Ollama defaults without credentials; follow the
+[local quick start](README.md#quick-start-with-local-defaults) to install its model
+and make a private configuration copy. Use the [API-key daemon example](README.md#daemon) and
 [tool grants](README.md#scoped-tools-and-agent-teams) for the current supported
-subset. Replace the intentionally invalid endpoint/model before
+subset. For the API-key example below, replace its invalid endpoint/model before
 model execution; example quotas are not provider guarantees.
 
 ```json
@@ -141,37 +159,39 @@ model execution; example quotas are not provider guarantees.
       "requires_tools": []
     }
   },
-  "systems": {
-    "research": {
-      "tools": [
-        "runtime.agent.propose",
-        "runtime.task.delegate",
-        "shared.evidence-notes"
-      ],
-      "operator": {
-        "prompt": "Coordinate tasks and delegate within the granted capabilities.",
-        "model": "default",
-        "tools": [
-          "runtime.agent.propose",
-          "runtime.task.delegate",
-          "shared.evidence-notes"
-        ],
-        "sandbox_profile": "worker"
-      },
-      "limits": {
-        "max_agents": 4,
-        "max_active_agents": 2,
-        "token_budget": 50000
-      }
+  "bootstrap": {
+    "operator": {
+      "model": "default",
+      "sandbox_profile": "worker"
+    },
+    "limits": {
+      "max_agents": 8,
+      "max_active_agents": 2,
+      "token_budget": 100000
     }
   }
 }
 ```
 
 Model aliases reference registered provider adapters and all applicable quota
-groups. The initial provider adapter implements OpenAI-compatible Chat Completions;
-a gateway may supply that API. Changing `base_url` does not change the protocol.
-Additional adapters must be explicitly implemented, not inferred from a URL.
+groups. `openai-chat-completions` uses an environment-supplied Bearer API key;
+`ollama` uses the same Chat Completions protocol without authentication, restricted
+to loopback `/v1` endpoints. `azure-openai` uses HTTPS `/openai/v1` endpoints and
+the Azure SDK's `DefaultAzureCredential`, including local `az login` credentials,
+with the `https://ai.azure.com/.default` scope. Omit `api_key_env` for Ollama/Azure;
+ambiguous key configuration is rejected. Azure model names are deployment names.
+Azure output caps use `max_completion_tokens`; the other adapters use `max_tokens`.
+A gateway may supply the configured API. Changing `base_url` does not change the
+protocol. Additional adapters must be explicitly implemented, not inferred from a URL.
+
+Credential acquisition stays in the daemon, after durable admission and within
+the provider deadline. Azure credentials initialize lazily and resolve a token
+per attempt; startup and system creation do not contact Azure or invoke its CLI.
+Credential errors before model HTTP dispatch are known failures that release
+goal/system reservations, without automatic retries or alternate credentials
+outside the configured SDK chain. Tokens never enter configuration snapshots,
+SQLite, artifacts, or workers; SDK/CLI diagnostics are sanitized before persistence.
+Local inference still uses the shared broker and consumes configured budgets.
 
 `runtime.agent.propose` and `runtime.task.delegate` are built-in broker operations,
 not executables or installed dependencies. Top-level `tools` defines shared catalog
@@ -189,8 +209,9 @@ agents or stopping/starting a system cannot replenish it.
 Resolve `data_dir` relative to the configuration file, not the caller's working
 directory. Resolve sandbox paths relative to each activation's private workspace.
 Do not perform shell expansion or interpolation in paths/prompts. Validate registry
-references, required credentials, bounds, and profile support before accepting work.
-Malformed configuration prevents readiness; errors name the field without secrets.
+references, required API-key credentials, bounds, and profile support before accepting work.
+Azure credential availability is checked on admitted calls. Malformed configuration
+prevents readiness; errors name the field without secrets.
 
 ### 2.3. Runtime grants versus nono permissions
 
@@ -228,7 +249,7 @@ affected work when continued execution would violate the new grant.
 
 ### 2.4. UI configuration and unresolved alternatives
 
-The UI may create systems from launch configurations, edit prompts and permitted
+The UI creates systems from a name and goal, and may edit prompts and permitted
 model/tool/profile selections, and set limits within the authenticated user's
 authority. Persist changes as revisions in SQLite. Selecting a model or profile
 never edits its administrative definition. Show effective permissions, remaining
@@ -251,7 +272,7 @@ directory and cannot bypass protected-path or artifact authorization checks.
 
 | Entity | Required information |
 | --- | --- |
-| System | ID, operator, lifecycle state, grants, aggregate limits |
+| System | ID, display name, constraints, operator, lifecycle state, grants, aggregate limits |
 | Goal | System, user prompt, owner, outcome, aggregate budget |
 | Agent revision | Identity/revision, creator/parent/owning goal, prompt, model, pinned skills/tools, memory scopes, wakeups, grants, limits |
 | Task | System/goal/agent, pinned revision, status, continuation, pending/completed call IDs |
@@ -302,6 +323,22 @@ arguments, and resource requirements. Resolve model-visible function names throu
 that activation's pinned mapping, not a global bare-name lookup. Local entries
 cannot shadow shared/built-in IDs or resolve to another system's private entries.
 Catalog queries and source/artifact access obey the same scope checks.
+
+The generic bootstrap grants capability inspection, collaborator discovery/proposal,
+delegation/progress/wait, memory put/search, inert artifact put/get, tool proposals
+and protected learning evaluation. It grants no host shell, live-market/network
+tool or ability to approve/assign generated code. Omitted administrative tool lists
+use this set; explicit empty lists grant none. Defaults are the `default` model
+alias, `worker` profile, eight agents/two active and 100,000 system tokens.
+
+`runtime.capabilities` returns current task pins, model/profile, remaining ancestor,
+goal and system allowance, remaining task turns, deadline, scoped protected check
+IDs and generated-build prerequisites. It must not reveal check contents or other
+systems. `runtime.artifact.put/get` store/read bounded inert UTF-8 text or JSON in
+SQLite: 3072 bytes, bounded encoded results, at most 128 artifacts per goal before
+further writes through this operation are denied. Reads require the same system
+and goal. These broker operations grant no host path access and never execute
+stored content; duplicate tool deliveries return the same artifact ID.
 
 Milestone 3 provides the built-in catalog, JSON-owned shared skills, exact scoped
 pins, child-agent assignment revisions, live revocation, and inert local drafts.
@@ -568,7 +605,10 @@ token window. Its OpenAI-compatible input estimate is serialized request bytes p
 configurable `input_headroom_percent` (default 20); this is deliberately conservative,
 not an exact tokenizer or cost guarantee. Currency pricing is unsupported. Only
 explicit 429 rejections retry, at most three attempts, within the original activation
-deadline. Streams are bounded and buffered through terminal usage before delivery.
+deadline. Administrative providers accept `timeout_seconds` in 1-3600; omitted/zero
+keeps the 60-second default. Credential acquisition and the complete HTTP response,
+including streaming, share that bounded allowance and any earlier goal deadline.
+Streams are bounded and buffered through terminal usage before delivery.
 Unknown outcomes retain their reservations; no automatic refund/reconciliation
 endpoint exists yet. A single active goal per system makes system-level round-robin
 also goal-fair. Descendant calls and tool continuations use the same admission
@@ -776,13 +816,29 @@ support active control, not just visualization:
 
 | UI action | Required behavior |
 | --- | --- |
-| Create and start | Choose an operator configuration, enter an initial goal/context, set allowed capabilities and budgets, and start a new system through the daemon API |
+| Create and start | Enter a name and initial goal/context, optionally reduce the budget, then explicitly start the saved goal through the daemon API without entering it again |
 | Inspect | List systems and show their state, team graph, tasks, messages, artifacts, schedules, queues, budgets, and failures |
 | Add information | Send follow-up instructions, corrections, answers, or scoped attachments to the system operator; optionally address an authorized task/agent |
 | Pause / resume | Stop admitting new activations without losing state; resume eligible work after current grant/budget checks |
 | Stop | Cancel that system's pending work/wakeups, revoke execution grants, and terminate its workers without stopping other systems |
 | Steer | Approve/reject requests and learning proposals, revise future agent configurations, and adjust authorized grants/budgets |
 | Manage tools | Browse shared tools, grant/revoke system access, inspect local proposals, approve/reject, assign agent versions, and roll back |
+
+Use readable summaries, status badges and tables as the default presentation.
+Raw JSON and advanced editors belong in a closed **Properties** disclosure, never
+the main view. Errors and blockers remain visible. A pending initial goal has an
+explicit **Start system** action; submitting it without a replacement consumes the
+saved goal. Replays retain command identity and must not create another goal.
+
+An **Activity** view visualizes the operator/agent creation hierarchy and observed
+task assignments, model/tool states, waiting reasons and recent event deliveries.
+It refreshes every five seconds, can be paused, and contains no editable forms.
+Do not present inferred model thoughts as observable progress. Its authenticated
+`GET /v1/systems/<id>/activity` endpoint takes a read-only SQLite snapshot scoped
+to the owned system's current/latest goal: at most 32 agents (operator first, with
+an explicit truncation flag), the bounded goal's tasks, and the 20 newest calls
+and event deliveries. It does not dispatch models, acknowledge events, or expose
+worker credentials. Full histories remain available through the paginated views.
 
 Provide a global **Tool catalog** for shared definitions and a **Tools** page inside
 each system. The system page separates granted shared entries from local entries,
@@ -800,6 +856,9 @@ as the HTTP Basic `operator` password. Host/Origin validation, origin-bound CSRF
 escaped templates, bounded API responses, no-store headers, and a restrictive CSP
 protect the browser boundary. The server-side Unix client alone holds the daemon
 token. Inspection views may refresh every five seconds; command forms do not.
+Use `Referrer-Policy: same-origin` so native form POSTs retain their origin while
+cross-origin referrers stay suppressed. Reject mismatched and `null` origins;
+do not weaken origin or CSRF validation to accommodate `no-referrer` forms.
 Inert text attachments are at most 3072 UTF-8 bytes and never authorize a host path,
 executable, or protected-evaluation input change.
 
@@ -824,7 +883,8 @@ reactivating old timers, or resetting consumed system budgets.
 The implemented scheduler uses one active goal/system, one activation/agent,
 per-system active-agent limits, and a global 64-activation ceiling. All descendants
 and continuations share the original goal deadline (by default the shortest quota
-wait plus three 60-second provider allowances, or an explicitly authorized
+wait plus three configured request timeouts for the initial operator's provider,
+60 seconds each by default, or an explicitly authorized
 `lifetime_seconds` up to 86400). Pause does not extend that deadline:
 expired input/work gets a visible dead-letter/terminal outcome, and a goal that
 finishes during pause becomes inactive. Indefinite standing work is not enabled.
@@ -853,7 +913,7 @@ Local audit is not tamper-proof against the host administrator.
 - Configuration rejects invalid fields/references, missing credentials, escaping
   paths, and unsupported profiles without partial activation. Inspection shows
   effective grants but never secrets.
-- Creating two instances from one launch configuration yields separate IDs/state;
+- Creating two systems with the same name/goal yields separate IDs/state;
   daemon restart neither duplicates instances nor overwrites UI revisions/budgets.
   Profile changes take effect only in newly confined processes.
 - Two systems run concurrently without unauthorized memory/message/artifact access.
@@ -922,7 +982,7 @@ boundaries whose behavior they claim to verify.
 
 ### 9.3. Integration scenarios
 
-1. **UI-controlled systems:** create two systems from one launch configuration.
+1. **UI-controlled systems:** create two named systems from goals without templates.
    Start/delegate work, send follow-up context, pause/resume, approve/reject, and
    stop through the actual UI/API path. Assert independent state and budgets,
    retained memory/history, durable input, and continued operation of the other

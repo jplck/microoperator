@@ -36,7 +36,7 @@ func TestRuntimeMetadataDoesNotChangePersistedJSON(t *testing.T) {
 func TestWorkflowInputsRejectInvalidCommandsBeforeWrites(t *testing.T) {
 	cfg := fixtureConfiguration(t)
 	store, configID := fixtureStore(t, cfg)
-	record, err := store.CreateSystem(context.Background(), localAdministrator, "create", CreateSystemCommand{Launch: "research"}, cfg, configID)
+	record, err := store.CreateSystem(context.Background(), localAdministrator, "create", CreateSystemCommand{Name: "research", Goal: fixtureGoal()}, cfg, configID)
 	if err != nil {
 		t.Fatal(err)
 	}

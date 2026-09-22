@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -11,10 +12,10 @@ import (
 
 func teamConfiguration(t *testing.T) Configuration {
 	cfg := fixtureConfiguration(t)
-	def := cfg.Systems["research"]
+	def := *cfg.Bootstrap
 	def.Tools = []string{"runtime.agent.propose", "runtime.agent.list", "runtime.task.delegate", "runtime.task.progress", "runtime.tool.propose", "runtime.text.analyze"}
 	def.Operator.Tools = append([]string{}, def.Tools...)
-	cfg.Systems["research"] = def
+	cfg.Bootstrap = &def
 	q := cfg.QuotaGroups["account"]
 	q.BurstRequests, q.RequestsPerMinute, q.TokensPerMinute = 60, 600, 1000000
 	cfg.QuotaGroups["account"] = q
@@ -62,6 +63,52 @@ func finishAction(t *testing.T, engine *fixtureWorkflow, e ExecutionRecord) {
 	t.Helper()
 	if err := engine.finishDelivery(context.Background(), e, nil, false); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestFailedDeliveryPreservesProviderReason(t *testing.T) {
+	for _, known := range []bool{false, true} {
+		t.Run(fmt.Sprint("known-", known), func(t *testing.T) {
+			cfg := fixtureConfiguration(t)
+			engine, id := fixtureTeamEngine(t, cfg)
+			fixtureCall(t, engine.broker, id, "failure", false)
+			ctx := context.Background()
+			_, e, found, err := engine.claim(ctx, time.Now())
+			if err != nil || !found {
+				t.Fatalf("claim: %v %v", found, err)
+			}
+			if err := engine.broker.queue(ctx, e); err != nil {
+				t.Fatal(err)
+			}
+			admitted := admitCall(t, engine.broker, e, true)
+			reason := "provider request deadline exceeded after admission; outcome unknown and reservation retained"
+			if known {
+				reason = "provider rejected request (HTTP 401)"
+			}
+			if err := engine.broker.settle(ctx, admitted, ProviderResult{Known: known, Reason: reason}, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			if err := engine.finishDelivery(ctx, e, errors.New("fixture-private-worker-diagnostic"), false); err != nil {
+				t.Fatal(err)
+			}
+			view, err := engine.store.Activity(ctx, localAdministrator, e.SystemID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var event *ActivityEvent
+			for i := range view.Events {
+				if view.Events[i].ID == e.EventID {
+					event = &view.Events[i]
+				}
+			}
+			if event == nil || event.State != "dead" || event.Reason != reason ||
+				len(view.Agents) != 1 || view.Agents[0].Reason != reason {
+				t.Fatalf("provider failure hidden or raw worker error leaked: %+v", view)
+			}
+			if known && view.System.ReservedTokens != 0 || !known && view.System.ReservedTokens != e.Reservation {
+				t.Fatalf("delivery changed provider accounting: %+v", view.System)
+			}
+		})
 	}
 }
 
