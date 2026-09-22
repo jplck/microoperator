@@ -1,22 +1,22 @@
 # Microoperator
 
-A Go daemon with validated configuration, SQLite-backed systems, an authenticated
-local control API, and a shared model broker. Reviewed, nono-go-confined workers
+A Linux/amd64 Go daemon with validated configuration, SQLite-backed systems, an
+authenticated local control API, and a shared model broker. Reviewed, nono-go-confined workers
 run bounded tool-using turns and delegate to agents through durable mailboxes.
 Scoped tools/skills, durable teams, memory, schedules, a detached browser UI, and
 protected learning evaluations are implemented.
 
 **Generated Go requires explicit approval and the resource-confined Linux/amd64
 profile.** The default reviewed-code profile cannot build or run generated tools.
-macOS retains resolver IPC and has no qualified resource profile, so generated
-execution remains blocked there.
+Other operating systems are not supported.
 
 ## Run
 
-Requires macOS or Linux/amd64, Go 1.24+, cgo, and a C compiler. Linux also requires
+Requires Linux/amd64, Go 1.24+, cgo, and a C compiler. The host also requires
 working Landlock and seccomp, `/lib`, `/lib64`, `/usr/lib`, and `/etc/ld.so.cache`.
-Sandbox profiles have been exercised on macOS/arm64 and Linux/amd64 WSL2; other
-Linux architectures are rejected until separately verified.
+Sandbox profiles have been exercised on Linux/amd64 WSL2; other Linux
+architectures are rejected until separately verified. The pinned `nono-go`
+binding and its Linux native library remain required for sandbox enforcement.
 
 ### Daemon
 
@@ -702,26 +702,22 @@ comparisons, approval replay/expiry, restart, explicit rollback, and unchanged t
 history. Linux generated-tool scenarios compile and execute through actual
 resource-confined launchers, reject changed artifacts/toolchains and cancel an
 active builder. No generated candidate is executed in the test runner.
-The daemon acceptance checks ran on Linux/amd64 WSL2; macOS was not rerun.
+The daemon acceptance checks ran on Linux/amd64 WSL2.
 Sandbox checks cover filesystem denials, symlink escapes, TCP/UDP/ordinary Unix-connection
 denials, thread/descendant inheritance, environment and descriptor isolation,
 failed launch, deadlines, and process-group cancellation. No real model API is called.
 
-Linux checks additionally cover pathname/abstract Unix sockets, socket pairs,
+Additional checks cover pathname/abstract Unix sockets, socket pairs,
 `io_uring`, `pidfd_getfd`, x32 syscalls, socket-filter inheritance, inherited socket
 descriptors, and rejection of socket-backed stdin before worker readiness.
-On macOS the suite still **characterizes the remaining Unix-stream socket
-allowance**. No check contacts the real system resolver. Passing this diagnostic
-suite is not approval of the full v1 sandbox profile.
+No check contacts the real system resolver. Passing this diagnostic suite is not
+approval of the full v1 sandbox profile.
 
 ## Required profile for generated execution
 
 Generated build/evaluation/promotion must use the resource-confined Linux profile,
 not the reviewed-code path, and preserve exact-artifact approval and narrowed
 broker authority. Passing evaluation alone does not approve or assign a tool.
-macOS is **not qualified**: its resolver allowance and absent aggregate resource
-enforcement still require implementation and real checks on a macOS host. A
-`resources` request on macOS is explicitly rejected.
 
 ### Resource-confined Linux profile
 
@@ -775,7 +771,7 @@ Real Linux checks cover namespace identity, sealed controls, aggregate disk
 exhaustion, kernel CPU throttling, memory OOM, process/thread refusal, an escaped
 process group, abrupt supervisor/daemon death, and durable artifact/accounting
 recovery. This qualification applies to the explicit resource profile on the
-checked host, not to nil-resource profiles, macOS, or a support flag alone.
+checked host, not to nil-resource profiles or a support flag alone.
 
 ### Linux/WSL2 recheck
 
@@ -783,6 +779,7 @@ Checked 21 September 2026 on Linux/amd64, WSL2 kernel
 `6.6.114.1-microsoft-standard-WSL2`, Go 1.24.0, GCC 13.3.0, and `CGO_ENABLED=1`.
 The nono-go dependency was not changed for the Linux socket fix. Its Linux-amd64 archive records
 native core commit `1d1c88c9f98f0a1f3ff79cff1509713aaec7cdb0` (0.65.1).
+`nono.Version()` reports the FFI version (`0.1.0` here), not that native core version.
 
 | Check | Observed result |
 | --- | --- |
@@ -809,23 +806,7 @@ files, and local fixture sockets with positive controls. No real resolver or
 external provider is contacted. This verifies the listed Linux boundaries, not
 all profiles indiscriminately. The additional resource qualification above covers
 hard limits, process-group escape containment, and cleanup after supervisor death
-only when that profile is explicitly configured. macOS was not rerun.
-
-### Deferred macOS binding upgrade
-
-As checked on 19 September 2026, our binding pin already matches upstream `main`
-(`9ba65a11c842`). The latest tagged release, `v0.21.0`, is older; there is no newer
-Go version to bump to that fixes this limitation.
-
-Keep the current dependency for now: no local fork or native rebuild. Recheck
-upstream when revisiting this issue. The eventual fix needs a newer bundled native
-core and binding support for disabling DNS, followed by real denial checks.
-Installing a newer nono CLI would not update the binding's statically linked core.
-
-The binding is pinned in `go.mod`; its macOS/arm64 archive records native commit
-`1d1c88c9f98f0a1f3ff79cff1509713aaec7cdb0` (core 0.65.1).
-`nono.Version()` reports the FFI version (`0.1.0` here), not that native core version.
-The newer upstream core has a DNS-blocking option that this binding does not expose.
+only when that profile is explicitly configured.
 
 See [implementation-plan.md](implementation-plan.md) for milestone status and next
 steps, and [spec.md](spec.md) for the target contract, architecture rationale, and

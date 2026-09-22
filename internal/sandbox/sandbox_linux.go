@@ -44,7 +44,7 @@ func configurePlatformSandbox(caps *nono.CapabilitySet) error {
 //
 // The caller must already be the fresh sandbox-exec child, locked to one OS thread.
 // This installation restricts that thread; it does not retrofit confinement onto
-// all existing Go runtime threads. sandboxExec follows it with nono.Apply and exec
+// all existing Go runtime threads. Exec follows it with nono.Apply and exec
 // on the same thread. Exec replaces the program and discards the other threads;
 // the new worker and its later threads/children inherit the restrictions.
 //
@@ -52,7 +52,7 @@ func configurePlatformSandbox(caps *nono.CapabilitySet) error {
 // error must abort the launch rather than continue with weaker protection.
 func applyPlatformSandbox() error {
 	// These values come from the Linux audit/seccomp/prctl interfaces. The current
-	// profile is gated to amd64 by supportedSandboxPlatform. In a seccomp return
+	// profile is gated to amd64 by Supported. In a seccomp return
 	// value, the upper bits select an action and the low bits can carry an errno:
 	// "deny" therefore makes a blocked call fail with EPERM ("operation not permitted").
 	const (

@@ -1,4 +1,4 @@
-//go:build integration && (darwin || linux)
+//go:build integration && linux
 
 package daemon
 
@@ -46,7 +46,7 @@ func integrationMain(m *testing.M) int {
 		return 0
 	}
 	if !sandbox.Supported() || !nono.IsSupported() {
-		fmt.Fprintln(os.Stderr, "integration preflight: supported macOS or Linux/amd64 confinement required")
+		fmt.Fprintln(os.Stderr, "integration preflight: supported Linux/amd64 confinement required")
 		return 1
 	}
 	root, err := os.MkdirTemp("", "microoperator-build-")
@@ -195,41 +195,33 @@ func TestSandboxBoundary(t *testing.T) {
 		{"descendant inherits", "descendant", outside, "denied", ""},
 		{"clean environment", "env", "MICROOPERATOR_TEST_SECRET", "result", ""},
 	}
-	listeners := []net.Listener{tcp, unix}
-	if runtime.GOOS == "linux" {
-		outsideUnix, err := net.Listen("unix", filepath.Join(t.TempDir(), "socket"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer outsideUnix.Close()
-		// Linux abstract Unix sockets live in a kernel namespace, not at a file
-		// path. A filesystem allowlist alone cannot exclude this communication.
-		abstractUnix, err := net.Listen("unix", "@microoperator-"+filepath.Base(root))
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer abstractUnix.Close()
-		listeners = append(listeners, outsideUnix, abstractUnix)
-		cases = append(cases,
-			boundaryCase{"deny outside unix", "unix", outsideUnix.Addr().String(), "denied", ""},
-			boundaryCase{"deny abstract unix", "unix", abstractUnix.Addr().String(), "denied", ""},
-			boundaryCase{"deny socket creation", "socket", "", "denied", ""},
-			boundaryCase{"deny socket pairs", "socketpair", "", "denied", ""},
-			boundaryCase{"new threads inherit socket filter", "threads-socket", "", "denied", ""},
-			boundaryCase{"descendants inherit socket filter", "descendant-socket", "", "denied", ""},
-		)
-		for name, number := range map[string]int{
-			"io_uring setup": 425, "io_uring enter": 426, "io_uring register": 427,
-			"pidfd_getfd": 438, "x32 syscall": 0x40000000 | syscall.SYS_GETPID,
-		} {
-			cases = append(cases, boundaryCase{
-				"deny " + name, "syscall", strconv.Itoa(number), "denied", "",
-			})
-		}
-	} else {
-		// Characterize the pinned macOS resolver exception, not strict network isolation.
+	outsideUnix, err := net.Listen("unix", filepath.Join(t.TempDir(), "socket"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer outsideUnix.Close()
+	// Linux abstract Unix sockets live in a kernel namespace, not at a file
+	// path. A filesystem allowlist alone cannot exclude this communication.
+	abstractUnix, err := net.Listen("unix", "@microoperator-"+filepath.Base(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer abstractUnix.Close()
+	listeners := []net.Listener{tcp, unix, outsideUnix, abstractUnix}
+	cases = append(cases,
+		boundaryCase{"deny outside unix", "unix", outsideUnix.Addr().String(), "denied", ""},
+		boundaryCase{"deny abstract unix", "unix", abstractUnix.Addr().String(), "denied", ""},
+		boundaryCase{"deny socket creation", "socket", "", "denied", ""},
+		boundaryCase{"deny socket pairs", "socketpair", "", "denied", ""},
+		boundaryCase{"new threads inherit socket filter", "threads-socket", "", "denied", ""},
+		boundaryCase{"descendants inherit socket filter", "descendant-socket", "", "denied", ""},
+	)
+	for name, number := range map[string]int{
+		"io_uring setup": 425, "io_uring enter": 426, "io_uring register": 427,
+		"pidfd_getfd": 438, "x32 syscall": 0x40000000 | syscall.SYS_GETPID,
+	} {
 		cases = append(cases, boundaryCase{
-			"known resolver socket allowance", "socket", "", "result", "created",
+			"deny " + name, "syscall", strconv.Itoa(number), "denied", "",
 		})
 	}
 	// A denied connection is only meaningful if the endpoint works. These

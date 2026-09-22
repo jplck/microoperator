@@ -19,12 +19,12 @@ Do not scaffold every future package, table, or interface at once.
 | 5. Memory and scheduled wakeups | Implemented, bounded by goal lifetime | 4 | Scoped retrieval, subscriptions, and persistent timers |
 | 6. Detached control UI | Implemented, loopback authenticated client | 1-5 | Create, steer, inspect, pause/resume, and stop systems |
 | 7. Learning and generated tools | Implemented, system-local; generated path requires S | 3-6; S before untrusted build/run | Protected evidence, exact approval, explicit assignment and rollback |
-| S. Sandbox and delegation qualification | Linux resource profile qualified on the checked host; macOS remains blocked | 0, 3-4, and README prerequisites | Required isolation profile for generated work, not another service |
+| S. Sandbox and delegation qualification | Linux resource profile qualified on the checked host | 0, 3-4, and README prerequisites | Required isolation profile for generated work, not another service |
 
 Milestones 1-6 can be developed and checked using reviewed workers, fixture tools,
 and fake providers. This does not authorize untrusted generated code or privileged
-autonomous deployment. Do not start the deferred native upgrade as part of ordinary
-feature work. Diagnostic fixtures must not become a production bypass for failed
+autonomous deployment. Linux/amd64 is the only supported runtime target.
+Diagnostic fixtures must not become a production bypass for failed
 profile checks or an unsandboxed fallback.
 
 **Persistence refactor:** Complete. [`internal/state`](internal/state) owns all
@@ -34,7 +34,7 @@ settlement, mailbox claims, timers, recovery, and learning retain their atomic
 boundaries; external effects use typed preparation/completion. SQLite schema 5 and
 JSON schema 1 are unchanged. Component checks, integration-tagged vet, and the full
 race-enabled real-process suite passed on Linux/amd64 WSL2. Boundary and JSON
-compatibility checks guard the extraction; macOS was not rerun. Other databases
+compatibility checks guard the extraction. Other databases
 remain future implementations, not an added adapter or generic repository layer.
 
 **Package organization:** Complete. The root remains the CLI entry point, with
@@ -42,9 +42,8 @@ daemon orchestration, provider transport, sandboxing, reviewed workers, the UI,
 shared protocol code, and persistence in separate internal packages. See the
 [package map](README.md#project-layout). Existing CLI commands and persisted/wire
 formats are unchanged. Unit/component checks, integration-tagged vet, and the
-race-enabled real-process suite passed on Linux/amd64 WSL2 after relocation;
-macOS was not rerun. Package dependency checks preserve the execution and storage
-boundaries.
+race-enabled real-process suite passed on Linux/amd64 WSL2 after relocation.
+Package dependency checks preserve the execution and storage boundaries.
 
 ## 0. Worker-launch foundation
 
@@ -56,8 +55,7 @@ infrastructure and coverage:
 - [internal/sandbox/launcher.go](internal/sandbox/launcher.go): internal launcher,
   sanitized environment, deadline/cancellation handling, and process supervision.
 - [internal/protocol/message.go](internal/protocol/message.go): bounded JSON framing.
-- [internal/sandbox/sandbox_linux.go](internal/sandbox/sandbox_linux.go) and
-  [internal/sandbox/sandbox_darwin.go](internal/sandbox/sandbox_darwin.go):
+- [internal/sandbox/sandbox_linux.go](internal/sandbox/sandbox_linux.go):
   platform runtime grants and Linux/amd64's supplemental socket-denying seccomp filter.
 - [cli_test.go](cli_test.go), [internal/protocol/message_test.go](internal/protocol/message_test.go),
   and [internal/sandbox/launcher_test.go](internal/sandbox/launcher_test.go):
@@ -68,12 +66,12 @@ infrastructure and coverage:
   environment isolation, failed setup, deadlines, and cancellation.
 - [README.md](README.md): reproducible run/check commands and explicit limits.
 
-The launch foundation was previously exercised on macOS/arm64 and Linux/amd64
-WSL2 with the supplemental Linux socket filter. Pipe communication, confinement,
-descriptor isolation, inheritance, and cancellation are now exercised using
+The launch foundation was exercised on Linux/amd64 WSL2 with the supplemental
+Linux socket filter. Pipe communication, confinement, descriptor isolation,
+inheritance, and cancellation are now exercised using
 integration-only targets, without shipping a simulated agent. These results cover
-the measured boundaries, not the entire target sandbox contract; macOS was not
-rerun on the Linux host. See the [README](README.md#linuxwsl2-recheck) for verified scope.
+the measured boundaries, not the entire target sandbox contract.
+See the [README](README.md#linuxwsl2-recheck) for verified scope.
 The complete qualification gate remains open; keep its technical blocker details
 in [README.md](README.md#required-profile-for-generated-execution).
 
@@ -119,7 +117,7 @@ unchanged across graceful and abrupt daemon restarts. Checks cover authorization
 credential/configuration startup failures, concurrent/stale revisions, transactional
 rollback, immutable snapshots, durable retries, token rotation, and removed
 administrative definitions. A fake provider observed zero calls; configuration
-declarations and system creation started no workers. macOS was not rerun.
+declarations and system creation started no workers.
 See [README.md](README.md#daemon) for runnable configuration and commands.
 
 ## 2. Model broker and a single operator
@@ -163,7 +161,7 @@ ambiguous effects. Only authenticated starts launch work; stop remains system-sc
 Component and real daemon/worker scenarios cover fake-provider responses, streaming,
 shared admission, throttling, cancellation, command replay, and graceful/abrupt
 restart. Unknown outcomes retain reservations; neither restart nor new goals refill
-lifetime budgets. Linux/amd64 WSL2 is the checked host; macOS has not been rerun.
+lifetime budgets. Linux/amd64 WSL2 is the checked host.
 See [README.md](README.md#run-one-operator-goal) for commands, fixed bounds, usage
 estimates, and remaining qualification limits. Later milestones extend this
 original single-turn slice. Currency accounting remains unsupported; milestone 7
@@ -255,7 +253,7 @@ event limits, terminal-delivery failure, and populated v1/v2 migration are cover
 
 Default tests, vet, and race-enabled integration checks pass on Linux/amd64 WSL2,
 including race instrumentation in the actual daemon/worker/tool executable.
-macOS was not rerun. The [README bounds](README.md#follow-up-input-and-scoped-controls)
+The [README bounds](README.md#follow-up-input-and-scoped-controls)
 are deliberate: eight turns, fixed fan-out/mailbox limits, non-streaming executable
 actions, and a goal lifetime that pause does not extend. Safe queued work/receipts
 resume; ambiguous effects and legacy non-resumable calls fail visibly.
@@ -324,7 +322,7 @@ repeated creation deduplicates and daemon work completes after UI shutdown.
 
 ## S. Qualification gate before untrusted execution
 
-The requested Linux enforcement work is implemented in `resources_linux.go`,
+The requested Linux enforcement work is implemented in `internal/sandbox/resources_linux.go`,
 the launcher/supervisor, and supplemental seccomp rules. It uses delegated cgroups
 and private namespaces directly, not containers or a native-library upgrade.
 The optional profile enforces aggregate activation CPU/memory/PID and workspace
@@ -340,8 +338,7 @@ Keep unsupported profiles and unqualified executable paths disabled.
 unit and asserts actual kernel throttling/OOM/PID-denial counters, combined
 scratch/output exhaustion, sealed namespace controls, escaped descendants,
 abrupt supervisor/daemon death, and artifact/accounting recovery. Missing required
-host support fails the integration run. macOS resource enforcement and its
-resolver allowance remain blocked; no macOS qualification is claimed.
+host support fails the integration run.
 Milestone 7 must require this qualified Linux resource profile for build/run,
 while preserving exact-artifact approval and the phase-4 delegation restrictions.
 `TestGeneratedBuildQualification` compiles a stdlib-only Go candidate in confinement
@@ -404,8 +401,9 @@ budget rejection, expiry, stale configuration approvals and ambiguous-build reco
 - Run targeted checks during development, then the applicable complete suites at
   milestone exit. Update documentation and status only after the observable result
   and relevant failure paths work.
-- Preserve the macOS and Linux/amd64 sandbox profiles. Add another platform
-  only with its own verified profile and integration evidence.
+- Preserve the Linux/amd64 sandbox profiles. Other operating systems are out of
+  scope; support another Linux architecture only with its own verified profile
+  and integration evidence.
 - The configuration-ownership and host-access alternatives in spec section 2.4
   remain unconfirmed. Use the documented conservative defaults; ask before expanding
   those boundaries rather than implementing both choices.

@@ -6,7 +6,7 @@ and governed system-local learning are implemented;
 see [README.md](README.md)
 for commands, verified scope, and unresolved native confinement limitations.
 Generated Go is enabled only through exact approval/assignment on the qualified
-resource-confined Linux/amd64 profile. Reviewed-only profiles and macOS cannot run it.
+resource-confined Linux/amd64 profile. Reviewed-only profiles cannot run it.
 See [implementation-plan.md](implementation-plan.md) for milestone status,
 dependencies, and acceptance checks. Diagnostic success is not qualification.
 "Must" denotes an implementation requirement, not a claim of completed functionality.
@@ -36,7 +36,8 @@ Every system-owned record and artifact must carry `system_id`. The daemon derive
 caller identity and scope from authenticated sessions, not request-supplied IDs.
 Cross-system access and messaging are denied unless explicitly granted.
 
-Project code is Go. Sandboxing uses `github.com/nolabs-ai/nono-go`, requiring cgo,
+Linux/amd64 is the only supported runtime target. Project code is Go.
+Sandboxing uses `github.com/nolabs-ai/nono-go`, requiring cgo,
 a C toolchain, and pinned native nono libraries. No containers or nono CLI are
 required. Systems share a daemon failure boundary; this is not hostile
 multi-tenant isolation.
@@ -409,8 +410,6 @@ proves that a running workload is confined.
 - Linux Landlock filesystem support starts at kernel 5.13; network and process
   scoping require newer ABIs and matching binding/native-core support. A kernel
   version alone is not a qualification check.
-- macOS uses `sandbox_init()`, documented by nono as a private Apple API. Treat OS
-  updates as compatibility events and rerun boundary checks.
 - Set `NetworkBlocked` explicitly and check non-TCP paths and inherited descriptors.
   Upstream CLI seccomp/network protections are not binding guarantees; the
   [researched binding/core](#appendix-a-research-baseline-and-primary-sources) predates
@@ -443,7 +442,6 @@ Bootstrap acknowledgement prevents workload execution if its supervisor died
 before parent-death protection was installed. Private workspace descriptors remain
 valid for authorized artifact ingestion after the namespace exits.
 No resource request may silently use the reviewed nil-resource profile instead.
-macOS rejects resource profiles and remains unqualified for generated execution.
 
 ## 4. Messaging and wakeups
 
@@ -1010,13 +1008,14 @@ The binding snapshot is nono-go commit
 `9ba65a11c842eed3644dcd2fb008a4a3f119f680`; its cited Linux-amd64 library records
 native core commit `1d1c88c9f98f0a1f3ff79cff1509713aaec7cdb0` (0.65.1).
 Upstream nono v0.78.0 documentation is comparison material, not evidence of binding
-feature parity. The binding requires Go 1.24+ and a C toolchain and supplies native
-libraries for Linux/macOS on amd64/arm64; this is not a claim of Microoperator
-support on those targets. Pin a compatible project toolchain and native artifacts.
+feature parity. The binding requires Go 1.24+ and a C toolchain and supplies the
+Linux/amd64 native library used by this project. Pin a compatible project toolchain
+and native artifacts; upstream support for other targets does not extend this
+project's Linux/amd64 support contract.
 The [README](README.md) owns verified platform scope and known qualification blockers.
 
 | Topic | Primary source |
 | --- | --- |
 | Upstream CLI network controls, not binding guarantees | [Networking, v0.78.0](https://github.com/nolabs-ai/nono/blob/v0.78.0/docs/cli/features/networking.mdx) |
-| nono Linux/macOS enforcement | [Landlock](https://github.com/nolabs-ai/nono/blob/v0.78.0/docs/cli/internals/landlock.mdx), [Seatbelt](https://github.com/nolabs-ai/nono/blob/v0.78.0/docs/cli/internals/seatbelt.mdx), [security model](https://github.com/nolabs-ai/nono/blob/v0.78.0/docs/cli/internals/security-model.mdx) |
+| nono Linux enforcement | [Landlock](https://github.com/nolabs-ai/nono/blob/v0.78.0/docs/cli/internals/landlock.mdx), [security model](https://github.com/nolabs-ai/nono/blob/v0.78.0/docs/cli/internals/security-model.mdx) |
 | nono-go API, build requirements, and native version | [Pinned README](https://github.com/nolabs-ai/nono-go/blob/9ba65a11c842eed3644dcd2fb008a4a3f119f680/README.md), [Apply and support API](https://github.com/nolabs-ai/nono-go/blob/9ba65a11c842eed3644dcd2fb008a4a3f119f680/nono.go), [bundled core version](https://github.com/nolabs-ai/nono-go/blob/9ba65a11c842eed3644dcd2fb008a4a3f119f680/internal/clib/linux_amd64/VERSION), [native core manifest](https://github.com/nolabs-ai/nono/blob/1d1c88c9f98f0a1f3ff79cff1509713aaec7cdb0/crates/nono/Cargo.toml) |

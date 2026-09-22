@@ -1,4 +1,4 @@
-//go:build integration && (darwin || linux)
+//go:build integration && linux
 
 package daemon
 
@@ -17,7 +17,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -215,12 +214,10 @@ func TestDaemonSystemsSurviveRestartWithoutExecution(t *testing.T) {
 	update := state.ReviseSystemCommand{ExpectedRevision: 1, Configuration: &next}
 	revised := daemonSystem(t, firstDaemon, fixtureControlToken, "PUT", "/v1/systems/"+first.ID+"/configuration",
 		"revise-first", update, http.StatusOK)
-	if runtime.GOOS == "linux" {
-		pid := firstDaemon.cmd.Process.Pid
-		children, err := os.ReadFile(fmt.Sprintf("/proc/%d/task/%d/children", pid, pid))
-		if err != nil || len(bytes.TrimSpace(children)) != 0 {
-			t.Fatalf("inactive daemon spawned child processes: %q, %v", children, err)
-		}
+	pid := firstDaemon.cmd.Process.Pid
+	children, err := os.ReadFile(fmt.Sprintf("/proc/%d/task/%d/children", pid, pid))
+	if err != nil || len(bytes.TrimSpace(children)) != 0 {
+		t.Fatalf("inactive daemon spawned child processes: %q, %v", children, err)
 	}
 	if providerCalls.Load() != 0 {
 		t.Fatal("inactive systems dispatched a model call")

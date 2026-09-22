@@ -1,4 +1,4 @@
-//go:build darwin || linux
+//go:build linux
 
 package sandbox
 
@@ -23,8 +23,8 @@ import (
 	nono "github.com/nolabs-ai/nono-go"
 )
 
-// Supported limits launch to platforms with an implemented
-// sandbox profile. It is separate from nono.IsSupported: a kernel can support
+// Supported limits launch to the implemented Linux/amd64 sandbox profile.
+// It is separate from nono.IsSupported: a kernel can support
 // nono while still lacking controls our worker profile needs.
 //
 // Linux is currently amd64-only because the supplemental seccomp filter checks
@@ -33,7 +33,7 @@ import (
 // A true result reports implemented support, not permission to run untrusted code.
 func Supported() bool {
 	// ponytail: qualify additional Linux architectures with real denial tests before enabling them.
-	return runtime.GOOS == "darwin" || (runtime.GOOS == "linux" && runtime.GOARCH == "amd64")
+	return runtime.GOOS == "linux" && runtime.GOARCH == "amd64"
 }
 
 // Exec turns a fresh launcher process into a confined worker or tool.
@@ -61,7 +61,7 @@ func Exec(root, target string, args []string, profiles ...state.SandboxConfig) e
 		return err
 	}
 	if !Supported() || !nono.IsSupported() {
-		return errors.New("sandbox launch requires supported macOS or Linux/amd64 confinement")
+		return errors.New("sandbox launch requires supported Linux/amd64 confinement")
 	}
 	root, err := filepath.EvalSymlinks(root)
 	if err != nil {
