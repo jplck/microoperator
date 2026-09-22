@@ -47,7 +47,7 @@ type fixtureWorkflow struct {
 func fixtureTeamEngine(t *testing.T, cfg Configuration) (*fixtureWorkflow, string) {
 	t.Helper()
 	store, id := fixtureStore(t, cfg)
-	return &fixtureWorkflow{workflow: workflow{store: store, cfg: cfg, owner: "fixture-owner", active: map[string]activation{}}, broker: &admission{store: store, cfg: cfg, now: time.Now}}, id
+	return &fixtureWorkflow{workflow: workflow{store: store, cfg: cfg, owner: "fixture-owner", active: map[string]string{}}, broker: &admission{store: store, cfg: cfg, now: time.Now}}, id
 }
 
 func (f *fixtureWorkflow) invokeTool(ctx context.Context, e ExecutionRecord, a ModelToolCall) (string, error) {

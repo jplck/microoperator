@@ -49,7 +49,7 @@ func (api *controlAPI) learningEvaluate(w http.ResponseWriter, r *http.Request) 
 		api.failure(w, err)
 		return
 	}
-	record, err := api.store.EvaluateLearning(r.Context(), api.cfg, api.stateOwner(), key, r.PathValue("system_id"), command)
+	record, err := api.store.EvaluateLearning(r.Context(), api.cfg, api.engine.owner, key, r.PathValue("system_id"), command)
 	if err == nil {
 		api.engine.notify()
 	}

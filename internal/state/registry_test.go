@@ -66,6 +66,26 @@ func finishAction(t *testing.T, engine *fixtureWorkflow, e ExecutionRecord) {
 	}
 }
 
+func TestClaimRespectsActiveAgentsAndSystemCapacity(t *testing.T) {
+	cfg := teamConfiguration(t)
+	cfg.Bootstrap.Limits.MaxActiveAgents = 1
+	engine, id := fixtureTeamEngine(t, cfg)
+	e := fixtureCall(t, engine.broker, id, "claim-capacity", false)
+	ctx, now := context.Background(), time.Now()
+	for _, active := range []map[string]string{
+		{e.AgentID: e.SystemID},
+		{"another-agent": e.SystemID},
+	} {
+		if _, _, found, err := engine.store.Claim(ctx, cfg, engine.owner, active, now); err != nil || found {
+			t.Fatalf("occupied agent or system admitted: found=%v err=%v", found, err)
+		}
+	}
+	_, claimed, found, err := engine.store.Claim(ctx, cfg, engine.owner, map[string]string{"another-agent": "another-system"}, now)
+	if err != nil || !found || claimed.AgentID != e.AgentID {
+		t.Fatalf("another system consumed this system's capacity: found=%v call=%+v err=%v", found, claimed, err)
+	}
+}
+
 func TestFailedDeliveryPreservesProviderReason(t *testing.T) {
 	for _, known := range []bool{false, true} {
 		t.Run(fmt.Sprint("known-", known), func(t *testing.T) {

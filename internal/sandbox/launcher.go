@@ -300,12 +300,7 @@ func SuperviseWorkspace(ctx context.Context, launcher, root, target string, args
 		}
 		return killGroup(cmd.Process.Pid)
 	}
-	cmd.Cancel = func() error {
-		if err := terminate(); err != nil {
-			return err
-		}
-		return nil
-	}
+	cmd.Cancel = terminate
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start sandbox launcher: %w", err)
 	}

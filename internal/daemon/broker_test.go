@@ -131,7 +131,7 @@ func providerConfigFor(t *testing.T, handler http.HandlerFunc) (state.Configurat
 func queuedCall(t *testing.T, b *modelBroker, id, key string) state.ExecutionRecord {
 	t.Helper()
 	e := fixtureCall(t, b, id, key, false)
-	if err := b.queue(context.Background(), e); err != nil {
+	if err := b.store.QueueModelCall(context.Background(), e); err != nil {
 		t.Fatal(err)
 	}
 	return e
@@ -141,7 +141,7 @@ func admitCall(t *testing.T, b *modelBroker, e state.ExecutionRecord, want bool)
 	t.Helper()
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	current, admitted, err := b.admit(context.Background(), e, b.now())
+	current, admitted, err := b.store.AdmitModelCall(context.Background(), b.cfg, e, b.now())
 	if err != nil || admitted != want {
 		t.Fatalf("admit %s: admitted=%v err=%v state=%s reason=%s", e.CallID, admitted, err, current.State, current.Reason)
 	}
@@ -157,7 +157,7 @@ func dispatchCall(t *testing.T, b *modelBroker, e state.ExecutionRecord) {
 	if !result.Known || result.Reason != "" {
 		t.Fatalf("provider result: %+v", result)
 	}
-	if err := b.settle(ctx, current, result, b.now()); err != nil {
+	if err := b.store.SettleModelCall(ctx, b.cfg, current, result, b.now()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -178,7 +178,7 @@ func TestBrokerSharedAdmissionAndFairness(t *testing.T) {
 	current := admitCall(t, b, a, true)
 	admitCall(t, b, c, false)
 	ctx := context.Background()
-	if err := b.settle(ctx, current, b.perform(ctx, current), b.now()); err != nil {
+	if err := b.store.SettleModelCall(ctx, b.cfg, current, b.perform(ctx, current), b.now()); err != nil {
 		t.Fatal(err)
 	}
 	dispatchCall(t, b, c)
@@ -400,7 +400,7 @@ func TestBrokerQueueBoundsAndCancellation(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "queue") {
 		t.Fatalf("queue bound: %v", err)
 	}
-	if err := b.queue(context.Background(), e); err != nil {
+	if err := b.store.QueueModelCall(context.Background(), e); err != nil {
 		t.Fatal(err)
 	}
 	result, err := b.cancelQueued(e)
@@ -428,7 +428,7 @@ func TestBrokerThrottleRecoveryAndUnknownUsage(t *testing.T) {
 			e := queuedCall(t, b, id, "first")
 			current := admitCall(t, b, e, true)
 			result := b.perform(context.Background(), current)
-			if err := b.settle(context.Background(), current, result, b.now()); err != nil {
+			if err := b.store.SettleModelCall(context.Background(), b.cfg, current, result, b.now()); err != nil {
 				t.Fatal(err)
 			}
 			before, err := b.store.GetSystem(context.Background(), localAdministrator, e.SystemID)
@@ -485,7 +485,7 @@ func TestRetryCannotOverfillSharedQueue(t *testing.T) {
 	queuedCall(t, b, id, "second")
 	result := b.perform(context.Background(), current)
 	clock.milliseconds.Add(2000)
-	if err := b.settle(context.Background(), current, result, b.now()); err != nil {
+	if err := b.store.SettleModelCall(context.Background(), b.cfg, current, result, b.now()); err != nil {
 		t.Fatal(err)
 	}
 	record, err := b.store.GetSystem(context.Background(), localAdministrator, first.SystemID)
@@ -495,7 +495,7 @@ func TestRetryCannotOverfillSharedQueue(t *testing.T) {
 	if record.Execution.State != "failed" || !strings.Contains(record.Execution.Reason, "queue capacity") || record.ReservedTokens != 0 {
 		t.Fatalf("retry overfilled queue: %+v", record.Execution)
 	}
-	quotas, err := b.quotas(context.Background())
+	quotas, err := b.store.Quotas(context.Background(), b.cfg, b.now())
 	if err != nil || quotas[0].Queued != 1 || quotas[0].CooldownUntil != b.now().Add(10*time.Second).UnixMilli() || count.Load() != 1 {
 		t.Fatalf("retry queue/cooldown accounting: %+v %v", quotas, err)
 	}

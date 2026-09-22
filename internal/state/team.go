@@ -98,8 +98,8 @@ func (engine *workflow) claim(ctx context.Context, now time.Time) (record System
 			continue
 		}
 		var active int64
-		for _, activation := range engine.active {
-			if activation.systemID == t.SystemID {
+		for _, systemID := range engine.active {
+			if systemID == t.SystemID {
 				active++
 			}
 		}

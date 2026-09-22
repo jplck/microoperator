@@ -153,7 +153,11 @@ func collectionTable(data []byte, section, base string) (uiTable, error) {
 				cell.Text = "Not settled / unknown"
 			}
 			if section == "artifacts" && column.Value == "artifact_id" {
-				if id, ok := value.(string); ok && id != "" {
+				id, ok := value.(string)
+				if value != nil && !ok {
+					return uiTable{}, fmt.Errorf("invalid artifact ID")
+				}
+				if id != "" {
 					cell.URL = base + "/" + url.PathEscape(id)
 				}
 			}

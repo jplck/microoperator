@@ -226,3 +226,31 @@ func TestCollectionTablesRejectMalformedShapesAndPreserveNumbers(t *testing.T) {
 		t.Fatal("structured content escaped Properties")
 	}
 }
+
+func TestArtifactSectionLinksOnceAndPreservesValidation(t *testing.T) {
+	const id = "sys_0123456789abcdef0123456789abcdef"
+	for _, tc := range []struct {
+		section, body string
+		status        int
+	}{
+		{"artifacts", `{"artifacts":[{"artifact_id":"report"}]}`, 200},
+		{"artifacts", `{"artifacts":[{"artifact_id":42}]}`, 502},
+		{"unknown", `{}`, 404},
+	} {
+		client := &http.Client{Transport: fixtureTransport(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(tc.body)), Header: http.Header{}}, nil
+		})}
+		app := &controlUI{client: client, logger: log.New(io.Discard, "", 0)}
+		request := httptest.NewRequest("GET", "/systems/"+id+"/"+tc.section, nil)
+		request.SetPathValue("system_id", id)
+		request.SetPathValue("section", tc.section)
+		response := httptest.NewRecorder()
+		app.section(response, request)
+		if response.Code != tc.status {
+			t.Fatalf("%s: status=%d, want %d: %s", tc.body, response.Code, tc.status, response.Body.String())
+		}
+		if tc.status == 200 && strings.Count(response.Body.String(), `href="/systems/`+id+`/artifacts/report"`) != 1 {
+			t.Fatal("artifact must have exactly one detail link")
+		}
+	}
+}

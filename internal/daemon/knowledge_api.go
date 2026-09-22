@@ -35,7 +35,7 @@ func (api *controlAPI) memory(w http.ResponseWriter, r *http.Request) {
 			api.failure(w, err)
 			return
 		}
-		record, err := api.store.PutMemory(r.Context(), api.cfg, api.stateOwner(), key, id, command)
+		record, err := api.store.PutMemory(r.Context(), api.cfg, api.engine.owner, key, id, command)
 		if err == nil {
 			api.engine.notify()
 		}
@@ -88,7 +88,7 @@ func (api *controlAPI) memoryState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("memory_id")
-	record, err := api.store.ChangeMemoryState(r.Context(), api.cfg, api.stateOwner(), key, r.PathValue("system_id"), command, id, action)
+	record, err := api.store.ChangeMemoryState(r.Context(), api.cfg, api.engine.owner, key, r.PathValue("system_id"), command, id, action)
 	if err == nil {
 		api.engine.notify()
 	}

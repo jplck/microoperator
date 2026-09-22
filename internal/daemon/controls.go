@@ -65,7 +65,7 @@ func (engine *executionEngine) cancelControlledCalls(ctx context.Context, system
 			continue
 		}
 		if strings.HasPrefix(active.callID, "evaluation_") {
-			task, err := engine.taskSnapshot(ctx, systemID, active.taskID)
+			task, err := engine.store.Task(ctx, systemID, active.taskID)
 			if err != nil {
 				engine.logger.Printf("evaluation control lookup: %v", err)
 				active.cancel()

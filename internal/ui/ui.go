@@ -22,6 +22,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -494,13 +495,7 @@ func (app *controlUI) section(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	allowed := false
-	for _, name := range []string{"agents", "tasks", "events", "model-calls", "tool-calls", "artifacts", "tools", "memory", "schedules", "subscriptions", "learning", "learning-checks", "learning-feedback"} {
-		if section == name {
-			allowed = true
-		}
-	}
-	if !allowed {
+	if !slices.Contains([]string{"agents", "tasks", "events", "model-calls", "tool-calls", "artifacts", "tools", "memory", "schedules", "subscriptions", "learning", "learning-checks", "learning-feedback"}, section) {
 		http.NotFound(w, r)
 		return
 	}
@@ -649,19 +644,6 @@ func (app *controlUI) section(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, entry := range entries {
 			page.Forms = append(page.Forms, uiForm{Title: "Cancel " + entry.ID, Path: base + "/" + section + "/" + entry.ID + "/cancel", Body: "{}", Return: back})
-		}
-	case "artifacts":
-		var records struct {
-			Artifacts []struct {
-				ID string `json:"artifact_id"`
-			} `json:"artifacts"`
-		}
-		if err := json.Unmarshal(data, &records); err != nil {
-			app.render(w, 502, uiPage{Title: "Invalid artifacts response", Data: err.Error()})
-			return
-		}
-		for _, entry := range records.Artifacts {
-			page.Links = append(page.Links, uiLink{entry.ID, back + "/" + entry.ID})
 		}
 	}
 	if len(page.Forms) > 0 {

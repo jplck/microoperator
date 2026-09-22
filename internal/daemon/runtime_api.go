@@ -119,7 +119,7 @@ func (api *controlAPI) revoke(w http.ResponseWriter, r *http.Request) {
 				active.cancel()
 				continue
 			}
-			task, taskErr := api.engine.taskSnapshot(r.Context(), record.ID, active.taskID)
+			task, taskErr := api.engine.store.Task(r.Context(), record.ID, active.taskID)
 			if taskErr != nil {
 				api.logger.Printf("revocation task lookup: %v", taskErr)
 				active.cancel()

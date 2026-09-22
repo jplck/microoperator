@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -62,13 +63,7 @@ func PrepareResourceRoot() (string, error) {
 		return "", err
 	}
 	for _, name := range []string{"cpu", "memory", "pids"} {
-		found := false
-		for _, available := range strings.Fields(string(controllers)) {
-			if name == available {
-				found = true
-			}
-		}
-		if !found {
+		if !slices.Contains(strings.Fields(string(controllers)), name) {
 			return "", fmt.Errorf("required delegated controller %s unavailable", name)
 		}
 	}

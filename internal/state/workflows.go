@@ -6,6 +6,7 @@ package state
 import (
 	"context"
 	"database/sql"
+	"maps"
 	"time"
 )
 
@@ -17,11 +18,9 @@ type workflow struct {
 	store        *Store
 	cfg          Configuration
 	owner        string
-	active       map[string]activation
+	active       map[string]string
 	shuttingDown bool
 }
-
-type activation struct{ systemID string }
 
 type admission struct {
 	store *Store
@@ -32,11 +31,7 @@ type admission struct {
 func (store *Store) Close() error { return store.db.Close() }
 
 func (store *Store) Claim(ctx context.Context, cfg Configuration, owner string, active map[string]string, now time.Time) (SystemRecord, ExecutionRecord, bool, error) {
-	snapshot := make(map[string]activation, len(active))
-	for id, system := range active {
-		snapshot[id] = activation{systemID: system}
-	}
-	w := workflow{store: store, cfg: cfg, owner: owner, active: snapshot}
+	w := workflow{store: store, cfg: cfg, owner: owner, active: maps.Clone(active)}
 	return w.claim(ctx, now)
 }
 

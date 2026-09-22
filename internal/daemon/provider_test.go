@@ -83,7 +83,7 @@ func TestBrokerBoundsThrottlingRetries(t *testing.T) {
 	if err != nil || result.State != "failed" || result.Attempts != 3 || result.Retries != 2 || result.GoalReserved != 0 || count.Load() != 3 {
 		t.Fatalf("retry bound: %+v %v; requests=%d", result, err, count.Load())
 	}
-	quotas, err := b.quotas(ctx)
+	quotas, err := b.store.Quotas(ctx, b.cfg, b.now())
 	if err != nil || quotas[0].Throttles != 3 || quotas[0].ReservedRateTokens != 3*e.Reservation {
 		t.Fatalf("throttling metrics: %+v %v", quotas, err)
 	}

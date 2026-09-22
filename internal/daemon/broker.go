@@ -48,7 +48,7 @@ func (b *modelBroker) available() bool {
 }
 
 func (b *modelBroker) call(ctx context.Context, session state.ExecutionRecord) (state.ExecutionRecord, error) {
-	if err := b.queue(ctx, session); err != nil {
+	if err := b.store.QueueModelCall(ctx, session); err != nil {
 		return state.ExecutionRecord{}, err
 	}
 	for {
@@ -58,7 +58,7 @@ func (b *modelBroker) call(ctx context.Context, session state.ExecutionRecord) (
 			return state.ExecutionRecord{}, errBrokerUnavailable
 		}
 		changed := b.changed
-		current, admitted, err := b.admit(ctx, session, b.now())
+		current, admitted, err := b.store.AdmitModelCall(ctx, b.cfg, session, b.now())
 		if err != nil {
 			if ctx.Err() == nil {
 				b.failLocked(err)
@@ -77,7 +77,7 @@ func (b *modelBroker) call(ctx context.Context, session state.ExecutionRecord) (
 			result := b.perform(ctx, current)
 			b.mu.Lock()
 			finishCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			err = b.settle(finishCtx, current, result, b.now())
+			err = b.store.SettleModelCall(finishCtx, b.cfg, current, result, b.now())
 			cancel()
 			if err != nil {
 				b.failLocked(err)
@@ -119,22 +119,6 @@ func (b *modelBroker) cancelQueued(session state.ExecutionRecord) (result state.
 	}
 	b.notifyLocked()
 	return result, nil
-}
-
-func (b *modelBroker) queue(ctx context.Context, session state.ExecutionRecord) error {
-	return b.store.QueueModelCall(ctx, session)
-}
-
-func (b *modelBroker) admit(ctx context.Context, session state.ExecutionRecord, now time.Time) (state.ExecutionRecord, bool, error) {
-	return b.store.AdmitModelCall(ctx, b.cfg, session, now)
-}
-
-func (b *modelBroker) settle(ctx context.Context, session state.ExecutionRecord, result state.ProviderResult, now time.Time) error {
-	return b.store.SettleModelCall(ctx, b.cfg, session, result, now)
-}
-
-func (b *modelBroker) quotas(ctx context.Context) ([]state.QuotaView, error) {
-	return b.store.Quotas(ctx, b.cfg, b.now())
 }
 
 func (b *modelBroker) perform(ctx context.Context, e state.ExecutionRecord) state.ProviderResult {

@@ -130,7 +130,7 @@ func (engine *executionEngine) execute(ctx context.Context, record state.SystemR
 	}
 	finishCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if finishErr := engine.finish(finishCtx, e, err, wasCanceled); finishErr != nil {
+	if finishErr := engine.finishDelivery(finishCtx, e, err, wasCanceled); finishErr != nil {
 		engine.broker.mu.Lock()
 		engine.broker.failLocked(finishErr)
 		engine.broker.mu.Unlock()
@@ -248,8 +248,4 @@ func (engine *executionEngine) runActivation(ctx context.Context, record state.S
 			}
 			return nil
 		}, profile)
-}
-
-func (engine *executionEngine) finish(ctx context.Context, session state.ExecutionRecord, workerErr error, canceled bool) (err error) {
-	return engine.finishDelivery(ctx, session, workerErr, canceled)
 }

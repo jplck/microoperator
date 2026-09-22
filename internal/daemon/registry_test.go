@@ -39,7 +39,7 @@ func claimAction(t *testing.T, engine *executionEngine, name string, args any) s
 	if err != nil || !found {
 		t.Fatalf("claim: %v %v", found, err)
 	}
-	if err := engine.broker.queue(context.Background(), e); err != nil {
+	if err := engine.broker.store.QueueModelCall(context.Background(), e); err != nil {
 		t.Fatal(err)
 	}
 	admitted := admitCall(t, engine.broker, e, true)
@@ -49,7 +49,7 @@ func claimAction(t *testing.T, engine *executionEngine, name string, args any) s
 	}
 	action := state.ModelToolCall{ID: "action", Type: "function"}
 	action.Function.Name, action.Function.Arguments = state.WireToolName(name), string(data)
-	if err := engine.broker.settle(context.Background(), admitted, state.ProviderResult{Known: true, Input: 11, Output: 7, Actions: []state.ModelToolCall{action}}, time.Now()); err != nil {
+	if err := engine.broker.store.SettleModelCall(context.Background(), engine.broker.cfg, admitted, state.ProviderResult{Known: true, Input: 11, Output: 7, Actions: []state.ModelToolCall{action}}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	record, err := engine.store.GetSystem(context.Background(), localAdministrator, e.SystemID)
@@ -168,7 +168,7 @@ func TestDelegationCannotBorrowRecipientAuthority(t *testing.T) {
 	invokeAction(t, engine, narrow)
 	finishAction(t, engine, narrow)
 	recipientCall := claimAction(t, engine, "runtime.text.analyze", state.TextArguments{Text: "forbidden"})
-	task, err := engine.taskSnapshot(context.Background(), root.SystemID, recipientCall.TaskID)
+	task, err := engine.store.Task(context.Background(), root.SystemID, recipientCall.TaskID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +278,7 @@ func TestScopedPauseResumeStopAndDurableInput(t *testing.T) {
 			if err := engine.finishDelivery(context.Background(), claimed, context.Canceled, true); err != nil {
 				t.Fatal(err)
 			}
-			task, err := engine.taskSnapshot(context.Background(), e.SystemID, e.TaskID)
+			task, err := engine.store.Task(context.Background(), e.SystemID, e.TaskID)
 			if err != nil || task.State != "canceled" {
 				t.Fatalf("stopped task: %+v %v", task, err)
 			}
@@ -344,11 +344,11 @@ func TestWaitingDelegationAndAppliedResultSurviveRecovery(t *testing.T) {
 	if err != nil || !found || e.AgentID != child.ID {
 		t.Fatalf("child was lost: %+v %v", e, err)
 	}
-	if err := engine.broker.queue(context.Background(), e); err != nil {
+	if err := engine.broker.store.QueueModelCall(context.Background(), e); err != nil {
 		t.Fatal(err)
 	}
 	dispatched := admitCall(t, engine.broker, e, true)
-	if err := engine.broker.settle(context.Background(), dispatched, state.ProviderResult{Known: true, Input: 11, Output: 7, Text: "durable child result"}, time.Now()); err != nil {
+	if err := engine.broker.store.SettleModelCall(context.Background(), engine.broker.cfg, dispatched, state.ProviderResult{Known: true, Input: 11, Output: 7, Text: "durable child result"}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	finishAction(t, engine, e)
@@ -399,7 +399,7 @@ func TestUnknownToolOutcomeCannotReplay(t *testing.T) {
 	if err := engine.store.RecoverExecutions(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	task, err := engine.taskSnapshot(context.Background(), e.SystemID, e.TaskID)
+	task, err := engine.store.Task(context.Background(), e.SystemID, e.TaskID)
 	if err != nil || task.State != "failed" {
 		t.Fatalf("unknown effect recovered as success: %+v %v", task, err)
 	}
@@ -449,7 +449,7 @@ func TestAgentAssignmentPinsAndDirectory(t *testing.T) {
 	if response := controlRequest(handler, "PUT", path, "ungranted", `{"expected_revision":2,"tools":[{"name":"runtime.text.analyze","version":999,"digest":"fake"}]}`, fixtureControlToken); response.Code != 400 {
 		t.Fatalf("forged pin: %s", response.Body.String())
 	}
-	pinned, err := engine.taskSnapshot(context.Background(), root.SystemID, task.ID)
+	pinned, err := engine.store.Task(context.Background(), root.SystemID, task.ID)
 	if err != nil || pinned.Revision != 1 || len(pinned.Tools) != 1 {
 		t.Fatalf("assignment rewrote waiting task: %+v %v", pinned, err)
 	}

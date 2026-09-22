@@ -334,7 +334,8 @@ func (api *controlAPI) brokerStatus(w http.ResponseWriter, r *http.Request) {
 	if !api.executionAvailable(w) {
 		return
 	}
-	quotas, err := api.engine.broker.quotas(r.Context())
+	broker := api.engine.broker
+	quotas, err := broker.store.Quotas(r.Context(), broker.cfg, broker.now())
 	if err != nil {
 		api.failure(w, err)
 		return
